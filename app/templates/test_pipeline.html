@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Leadership Assessment – Pipeline Test</title>
+  <style>
+    :root {
+      --bg: #0f0f12;
+      --surface: #1a1a1f;
+      --surface-alt: #222228;
+      --border: #2d2d35;
+      --text: #e8e6e3;
+      --muted: #8b8685;
+      --accent: #7c9cff;
+      --accent-hover: #9ab0ff;
+      --accent-dim: rgba(124,156,255,0.12);
+      --danger: #e07c7c;
+      --success: #7cc97c;
+      --success-dim: rgba(124,201,124,0.12);
+      --warning: #e0c97c;
+      --warning-dim: rgba(224,201,124,0.12);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "DM Sans", "Inter", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem 4rem;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      letter-spacing: -0.03em;
+      margin-bottom: 0.25rem;
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin-bottom: 2rem;
+    }
+
+    /* ── Stepper ── */
+    .stepper {
+      display: flex;
+      align-items: center;
+      gap: 0;
+      margin-bottom: 2.5rem;
+      width: 100%;
+      max-width: 640px;
+    }
+    .step {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      white-space: nowrap;
+    }
+    .step-num {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.8rem; font-weight: 600;
+      border: 2px solid var(--border);
+      color: var(--muted);
+      background: transparent;
+      transition: all 0.3s;
+      flex-shrink: 0;
+    }
+    .step-label {
+      font-size: 0.8rem;
+      color: var(--muted);
+      transition: color 0.3s;
+    }
+    .step.active .step-num {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: var(--bg);
+    }
+    .step.active .step-label { color: var(--text); }
+    .step.done .step-num {
+      border-color: var(--success);
+      background: var(--success);
+      color: var(--bg);
+    }
+    .step.done .step-label { color: var(--success); }
+    .step-line {
+      flex: 1;
+      height: 2px;
+      background: var(--border);
+      margin: 0 0.5rem;
+      transition: background 0.3s;
+    }
+    .step-line.done { background: var(--success); }
+
+    /* ── Card ── */
+    .card {
+      width: 100%;
+      max-width: 640px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 2rem;
+      display: none;
+    }
+    .card.visible { display: block; }
+    .card h2 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      margin-bottom: 0.35rem;
+      letter-spacing: -0.02em;
+    }
+    .card .desc {
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-bottom: 1.5rem;
+      line-height: 1.5;
+    }
+
+    /* ── Form Elements ── */
+    label {
+      display: block;
+      font-size: 0.82rem;
+      font-weight: 500;
+      color: var(--muted);
+      margin-bottom: 0.35rem;
+    }
+    textarea, input[type="number"], input[type="text"] {
+      width: 100%;
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 0.9rem;
+      padding: 0.75rem;
+      resize: vertical;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    textarea:focus, input:focus {
+      border-color: var(--accent);
+    }
+    textarea { min-height: 140px; }
+    .form-row {
+      display: flex;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+    .form-row > div { flex: 1; }
+    .form-group { margin-bottom: 1rem; }
+
+    /* ── Buttons ── */
+    .btn-row {
+      display: flex;
+      gap: 0.75rem;
+      margin-top: 1.5rem;
+    }
+    button {
+      font: inherit;
+      font-size: 0.9rem;
+      font-weight: 500;
+      padding: 0.7rem 1.5rem;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.05s;
+    }
+    button:active { transform: scale(0.98); }
+    .btn-primary {
+      background: var(--accent);
+      color: var(--bg);
+    }
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn-primary:disabled {
+      background: var(--border);
+      color: var(--muted);
+      cursor: not-allowed;
+    }
+    .btn-secondary {
+      background: var(--surface-alt);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:hover { background: var(--border); }
+    .btn-success {
+      background: var(--success);
+      color: var(--bg);
+    }
+    .btn-success:hover { background: #8dd88d; }
+
+    /* ── Result Panels ── */
+    .result-panel {
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.25rem;
+      margin-top: 1.25rem;
+      display: none;
+    }
+    .result-panel.visible { display: block; }
+    .result-panel h3 {
+      font-size: 0.9rem;
+      font-weight: 600;
+      margin-bottom: 0.75rem;
+      color: var(--accent);
+    }
+    .result-row {
+      display: flex;
+      gap: 0.5rem;
+      padding: 0.35rem 0;
+      font-size: 0.85rem;
+      border-bottom: 1px solid rgba(45,45,53,0.6);
+    }
+    .result-row:last-child { border-bottom: none; }
+    .result-key {
+      color: var(--muted);
+      min-width: 130px;
+      flex-shrink: 0;
+      font-weight: 500;
+    }
+    .result-val { color: var(--text); word-break: break-word; }
+
+    .question-item {
+      padding: 0.6rem 0;
+      border-bottom: 1px solid rgba(45,45,53,0.6);
+      font-size: 0.85rem;
+      line-height: 1.5;
+    }
+    .question-item:last-child { border-bottom: none; }
+    .question-type {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 0.15rem;
+    }
+
+    /* ── Verdict ── */
+    .verdict-card {
+      text-align: center;
+      padding: 2rem;
+    }
+    .verdict-badge {
+      display: inline-block;
+      font-size: 1.1rem;
+      font-weight: 700;
+      padding: 0.6rem 1.5rem;
+      border-radius: 10px;
+      margin-bottom: 1.25rem;
+      letter-spacing: 0.03em;
+    }
+    .verdict-STRONG_FIT { background: var(--success-dim); color: var(--success); }
+    .verdict-FIT { background: var(--success-dim); color: var(--success); }
+    .verdict-MODERATE_FIT { background: var(--warning-dim); color: var(--warning); }
+    .verdict-WEAK_FIT { background: rgba(224,124,124,0.12); color: var(--danger); }
+    .verdict-NOT_RECOMMENDED { background: rgba(224,124,124,0.2); color: var(--danger); }
+    .rationale-text {
+      font-size: 0.92rem;
+      line-height: 1.65;
+      color: var(--text);
+      text-align: left;
+      background: var(--surface-alt);
+      border-radius: 10px;
+      padding: 1.25rem;
+    }
+
+    /* ── Spinner / Status ── */
+    .status-bar {
+      display: none;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.85rem;
+      padding: 0.6rem 0.9rem;
+      border-radius: 8px;
+      margin-top: 1rem;
+    }
+    .status-bar.visible { display: flex; }
+    .status-bar.loading {
+      background: var(--accent-dim);
+      color: var(--accent);
+    }
+    .status-bar.error {
+      background: rgba(224,124,124,0.12);
+      color: var(--danger);
+    }
+    .spinner {
+      width: 16px; height: 16px;
+      border: 2px solid transparent;
+      border-top-color: currentColor;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Interview link ── */
+    .interview-link {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1rem;
+      padding: 1.5rem;
+      background: var(--surface-alt);
+      border-radius: 10px;
+      margin-top: 0.5rem;
+    }
+    .interview-link a {
+      color: var(--accent);
+      font-weight: 500;
+      text-decoration: none;
+      font-size: 0.95rem;
+    }
+    .interview-link a:hover { text-decoration: underline; }
+    .interview-link .hint {
+      font-size: 0.8rem;
+      color: var(--muted);
+      line-height: 1.5;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Leadership Assessment</h1>
+  <p class="subtitle">End-to-end pipeline testing</p>
+
+  <!-- Stepper -->
+  <div class="stepper">
+    <div class="step active" data-step="1">
+      <div class="step-num">1</div>
+      <span class="step-label">Requirements</span>
+    </div>
+    <div class="step-line" data-line="1"></div>
+    <div class="step" data-step="2">
+      <div class="step-num">2</div>
+      <span class="step-label">Assessment</span>
+    </div>
+    <div class="step-line" data-line="2"></div>
+    <div class="step" data-step="3">
+      <div class="step-num">3</div>
+      <span class="step-label">Interview</span>
+    </div>
+    <div class="step-line" data-line="3"></div>
+    <div class="step" data-step="4">
+      <div class="step-num">4</div>
+      <span class="step-label">Prediction</span>
+    </div>
+  </div>
+
+  <!-- Phase 1: Job Requirements Analysis -->
+  <div class="card visible" id="phase1">
+    <h2>Job Requirements Analysis</h2>
+    <p class="desc">Paste a job description below. The system will extract structured requirements using GPT.</p>
+    <div class="form-group">
+      <label for="jobDesc">Job Description</label>
+      <textarea id="jobDesc" placeholder="Paste the full job description here..."></textarea>
+    </div>
+    <div class="btn-row">
+      <button class="btn-primary" id="analyzeBtn" onclick="analyzeJob()">Analyze</button>
+    </div>
+    <div class="status-bar" id="phase1Status">
+      <div class="spinner"></div>
+      <span id="phase1StatusText">Analyzing...</span>
+    </div>
+    <div class="result-panel" id="phase1Result">
+      <h3>Extracted Requirements</h3>
+      <div id="requirementsBody"></div>
+    </div>
+    <div class="btn-row" id="phase1Continue" style="display:none;">
+      <button class="btn-success" onclick="goToPhase(2)">Continue to Assessment &rarr;</button>
+    </div>
+  </div>
+
+  <!-- Phase 2: Generate Assessment -->
+  <div class="card" id="phase2">
+    <h2>Generate Assessment</h2>
+    <p class="desc">Generate 10 tailored interview questions from the extracted job requirements.</p>
+    <div class="form-row">
+      <div>
+        <label for="jobReqId">Job Requirements ID</label>
+        <input type="number" id="jobReqId" readonly>
+      </div>
+      <div>
+        <label for="userId">User ID</label>
+        <input type="number" id="userId" value="1" min="1">
+      </div>
+    </div>
+    <div class="btn-row">
+      <button class="btn-secondary" onclick="goToPhase(1)">&larr; Back</button>
+      <button class="btn-primary" id="generateBtn" onclick="generateAssessment()">Generate Questions</button>
+    </div>
+    <div class="status-bar" id="phase2Status">
+      <div class="spinner"></div>
+      <span id="phase2StatusText">Generating...</span>
+    </div>
+    <div class="result-panel" id="phase2Result">
+      <h3>Assessment Questions</h3>
+      <div id="questionsBody"></div>
+    </div>
+    <div class="btn-row" id="phase2Continue" style="display:none;">
+      <button class="btn-success" onclick="goToPhase(3)">Continue to Interview &rarr;</button>
+    </div>
+  </div>
+
+  <!-- Phase 3: Interview -->
+  <div class="card" id="phase3">
+    <h2>Conduct Interview</h2>
+    <p class="desc">Start a voice interview with the AI agent. The agent will ask the generated questions one by one and record your responses.</p>
+    <div class="interview-link" id="interviewLinkBox">
+      <a id="interviewLink" href="#" target="_blank">Open Voice Interview &rarr;</a>
+      <p class="hint">Opens in a new tab. Complete the interview, then come back and click Continue.</p>
+    </div>
+    <div class="btn-row">
+      <button class="btn-secondary" onclick="goToPhase(2)">&larr; Back</button>
+      <button class="btn-success" id="phase3ContinueBtn" onclick="goToPhase(4)">Continue to Prediction &rarr;</button>
+    </div>
+  </div>
+
+  <!-- Phase 4: Prediction -->
+  <div class="card" id="phase4">
+    <h2>Prediction</h2>
+    <p class="desc">Run the fits-and-gaps analysis and get a final hiring prediction for this candidate.</p>
+    <div class="form-group">
+      <label for="assessmentIdPred">Assessment ID</label>
+      <input type="number" id="assessmentIdPred" readonly>
+    </div>
+    <div class="btn-row">
+      <button class="btn-secondary" onclick="goToPhase(3)">&larr; Back</button>
+      <button class="btn-primary" id="predictBtn" onclick="runPrediction()">Run Prediction</button>
+    </div>
+    <div class="status-bar" id="phase4Status">
+      <div class="spinner"></div>
+      <span id="phase4StatusText">Analyzing...</span>
+    </div>
+    <div class="result-panel" id="phase4Result">
+      <div class="verdict-card">
+        <div id="verdictBadge" class="verdict-badge"></div>
+        <div id="rationaleText" class="rationale-text"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const state = {
+      phase: 1,
+      jobRequirementsId: null,
+      assessmentId: null,
+    };
+
+    const REQUIREMENT_LABELS = {
+      requirement: "Requirement",
+      skill: "Skills",
+      soft_skill: "Soft Skills",
+      experience: "Experience",
+      education: "Education",
+      certification: "Certification",
+      responsibility: "Responsibilities",
+      language: "Language",
+      industry_experience: "Industry Exp.",
+      role_experience: "Role Exp.",
+      location: "Location",
+      availability: "Availability",
+      work_authorization: "Work Auth.",
+      seniority_level: "Seniority",
+      culture_fit: "Culture Fit",
+    };
+
+    const QUESTION_LABELS = {
+      behavioral_question: "Behavioral",
+      competency_based_question: "Competency-Based",
+      situational_question: "Situational",
+      panel_question: "Panel",
+      business_case_question: "Business Case",
+      live_simulation_question: "Live Simulation",
+      psychometric_question: "Psychometric",
+      structured_reference_question: "Structured Reference",
+      culture_alignment_question: "Culture Alignment",
+      integrity_ethics_question: "Integrity & Ethics",
+    };
+
+    function goToPhase(n) {
+      state.phase = n;
+      document.querySelectorAll(".card").forEach(c => c.classList.remove("visible"));
+      document.getElementById("phase" + n).classList.add("visible");
+
+      document.querySelectorAll(".step").forEach(s => {
+        const sn = parseInt(s.dataset.step);
+        s.classList.remove("active", "done");
+        if (sn < n) s.classList.add("done");
+        else if (sn === n) s.classList.add("active");
+      });
+      document.querySelectorAll(".step-line").forEach(l => {
+        const ln = parseInt(l.dataset.line);
+        l.classList.toggle("done", ln < n);
+      });
+
+      if (n === 3 && state.assessmentId) {
+        const link = document.getElementById("interviewLink");
+        link.href = "/agent/test?assessment_id=" + state.assessmentId;
+        link.textContent = "Open Voice Interview (Assessment #" + state.assessmentId + ") →";
+      }
+      if (n === 4 && state.assessmentId) {
+        document.getElementById("assessmentIdPred").value = state.assessmentId;
+      }
+    }
+
+    function showStatus(phaseId, type, text) {
+      const bar = document.getElementById(phaseId + "Status");
+      bar.className = "status-bar visible " + type;
+      const spinner = bar.querySelector(".spinner");
+      spinner.style.display = type === "loading" ? "block" : "none";
+      document.getElementById(phaseId + "StatusText").textContent = text;
+    }
+
+    function hideStatus(phaseId) {
+      document.getElementById(phaseId + "Status").className = "status-bar";
+    }
+
+    async function analyzeJob() {
+      const desc = document.getElementById("jobDesc").value.trim();
+      if (!desc) return;
+      const btn = document.getElementById("analyzeBtn");
+      btn.disabled = true;
+      showStatus("phase1", "loading", "Analyzing job description...");
+      document.getElementById("phase1Result").classList.remove("visible");
+      document.getElementById("phase1Continue").style.display = "none";
+
+      try {
+        const form = new FormData();
+        form.append("job_description", desc);
+        const res = await fetch("/job-requirements/analyze", { method: "POST", body: form });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || res.statusText);
+        }
+        const data = await res.json();
+        state.jobRequirementsId = data.job_id;
+
+        const body = document.getElementById("requirementsBody");
+        body.innerHTML = "";
+        for (const [key, label] of Object.entries(REQUIREMENT_LABELS)) {
+          const val = data[key];
+          if (!val || val === "null" || val === "None") continue;
+          const row = document.createElement("div");
+          row.className = "result-row";
+          row.innerHTML = '<span class="result-key">' + label + '</span><span class="result-val">' + escapeHtml(val) + "</span>";
+          body.appendChild(row);
+        }
+
+        hideStatus("phase1");
+        document.getElementById("phase1Result").classList.add("visible");
+        document.getElementById("phase1Continue").style.display = "flex";
+
+        document.getElementById("jobReqId").value = data.id;
+
+      } catch (e) {
+        showStatus("phase1", "error", "Error: " + e.message);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function generateAssessment() {
+      const jobReqId = parseInt(document.getElementById("jobReqId").value);
+      const userId = parseInt(document.getElementById("userId").value);
+      if (!jobReqId || !userId) { alert("Fill in both Job Requirements ID and User ID."); return; }
+      const btn = document.getElementById("generateBtn");
+      btn.disabled = true;
+      showStatus("phase2", "loading", "Generating assessment questions...");
+      document.getElementById("phase2Result").classList.remove("visible");
+      document.getElementById("phase2Continue").style.display = "none";
+
+      try {
+        const res = await fetch("/assessments/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ job_requirements_id: jobReqId, user_id: userId }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || res.statusText);
+        }
+        const data = await res.json();
+        state.assessmentId = data.id;
+
+        const body = document.getElementById("questionsBody");
+        body.innerHTML = "";
+        for (const [key, label] of Object.entries(QUESTION_LABELS)) {
+          const val = data[key];
+          if (!val) continue;
+          const item = document.createElement("div");
+          item.className = "question-item";
+          item.innerHTML = '<div class="question-type">' + label + "</div>" + escapeHtml(val);
+          body.appendChild(item);
+        }
+
+        hideStatus("phase2");
+        document.getElementById("phase2Result").classList.add("visible");
+        document.getElementById("phase2Continue").style.display = "flex";
+      } catch (e) {
+        showStatus("phase2", "error", "Error: " + e.message);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function runPrediction() {
+      const assessmentId = parseInt(document.getElementById("assessmentIdPred").value);
+      if (!assessmentId) { alert("Assessment ID is required."); return; }
+      const btn = document.getElementById("predictBtn");
+      btn.disabled = true;
+      showStatus("phase4", "loading", "Running fits & gaps analysis...");
+      document.getElementById("phase4Result").classList.remove("visible");
+
+      try {
+        const res = await fetch("/analysis/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ assessment_id: assessmentId }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || res.statusText);
+        }
+        const data = await res.json();
+
+        const badge = document.getElementById("verdictBadge");
+        badge.textContent = data.verdict.replace(/_/g, " ");
+        badge.className = "verdict-badge verdict-" + data.verdict;
+
+        document.getElementById("rationaleText").textContent = data.rationale;
+
+        hideStatus("phase4");
+        document.getElementById("phase4Result").classList.add("visible");
+      } catch (e) {
+        showStatus("phase4", "error", "Error: " + e.message);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function escapeHtml(s) {
+      const d = document.createElement("div");
+      d.textContent = s;
+      return d.innerHTML;
+    }
+  </script>
+</body>
+</html>

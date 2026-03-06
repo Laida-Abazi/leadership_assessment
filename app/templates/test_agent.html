@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voice agent – friendly conversation</title>
+  <style>
+    :root {
+      --bg: #0f0f12;
+      --surface: #1a1a1f;
+      --border: #2d2d35;
+      --text: #e8e6e3;
+      --muted: #8b8685;
+      --accent: #7c9cff;
+      --accent-hover: #9ab0ff;
+      --danger: #e07c7c;
+      --success: #7cc97c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "DM Sans", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+    }
+    main {
+      width: 100%;
+      max-width: 420px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 2rem;
+      text-align: center;
+    }
+    h1 {
+      font-size: 1.35rem;
+      font-weight: 600;
+      margin: 0 0 0.5rem;
+      letter-spacing: -0.02em;
+    }
+    p.sub {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin: 0 0 1.75rem;
+    }
+    .status {
+      font-size: 0.85rem;
+      padding: 0.5rem 0.75rem;
+      border-radius: 8px;
+      margin-bottom: 1.5rem;
+      min-height: 2.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .status.idle { background: var(--border); color: var(--muted); }
+    .status.connecting { background: rgba(124, 156, 255, 0.15); color: var(--accent); }
+    .status.connected { background: rgba(124, 201, 124, 0.15); color: var(--success); }
+    .status.error { background: rgba(224, 124, 124, 0.15); color: var(--danger); }
+    button {
+      font: inherit;
+      font-size: 1rem;
+      font-weight: 500;
+      padding: 0.85rem 1.75rem;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.05s;
+    }
+    button:active { transform: scale(0.98); }
+    button.primary {
+      background: var(--accent);
+      color: var(--bg);
+    }
+    button.primary:hover { background: var(--accent-hover); }
+    button.primary:disabled {
+      background: var(--border);
+      color: var(--muted);
+      cursor: not-allowed;
+    }
+    button.danger {
+      background: rgba(224, 124, 124, 0.2);
+      color: var(--danger);
+    }
+    button.danger:hover { background: rgba(224, 124, 124, 0.35); }
+    .hint {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-top: 1.25rem;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Voice agent</h1>
+    <p class="sub" id="sub">Have a friendly conversation with the assistant</p>
+    <div id="status" class="status idle">Click Start to begin</div>
+    <button id="btn" class="primary">Start conversation</button>
+    <p class="hint" id="hint">Allow microphone access. Speak after you see “Connected”. The agent will reply with voice.</p>
+  </main>
+  <script>
+    (function () {
+      const statusEl = document.getElementById("status");
+      const btn = document.getElementById("btn");
+      const subEl = document.getElementById("sub");
+      const hintEl = document.getElementById("hint");
+
+      const assessmentId = (function () {
+        const params = new URLSearchParams(location.search);
+        const id = params.get("assessment_id");
+        if (id == null || id === "") return null;
+        const n = parseInt(id, 10);
+        return isNaN(n) ? null : n;
+      })();
+      if (assessmentId != null && subEl && hintEl) {
+        document.title = "Voice agent – assessment interview";
+        subEl.textContent = "Complete the leadership assessment interview. The agent will ask you each question in turn.";
+        hintEl.textContent = "Allow microphone access. The agent will ask questions one by one—answer each, then wait for the next.";
+      } else if (hintEl) {
+        hintEl.textContent = "Allow microphone access. Speak after you see \"Connected\". To run an assessment and save answers, open this page with ?assessment_id=1 (use your assessment ID).";
+      }
+
+      const INPUT_SAMPLE_RATE = 16000;
+      const OUTPUT_SAMPLE_RATE = 24000;
+      const CHUNK_MS = 80;
+      const INPUT_CHUNK_SAMPLES = Math.floor((INPUT_SAMPLE_RATE * CHUNK_MS) / 1000);
+
+      let ws = null;
+      let stream = null;
+      let audioContext = null;
+      let captureSourceNode = null;
+      let captureWorkletNode = null;
+      let playbackContext = null;
+      let nextPlayTime = 0;
+
+      function setStatus(cls, text) {
+        statusEl.className = "status " + cls;
+        statusEl.textContent = text;
+      }
+
+      function setConnected(connected) {
+        btn.textContent = connected ? "End conversation" : "Start conversation";
+        btn.className = connected ? "danger" : "primary";
+      }
+
+      function playPCM24k(pcmBytes) {
+        if (!playbackContext) return;
+        if (playbackContext.state === "suspended") playbackContext.resume();
+        const now = playbackContext.currentTime;
+        if (nextPlayTime < now - 0.1) nextPlayTime = now;
+        const numSamples = pcmBytes.byteLength / 2;
+        const buffer = playbackContext.createBuffer(1, numSamples, OUTPUT_SAMPLE_RATE);
+        const channel = buffer.getChannelData(0);
+        const view = new Int16Array(pcmBytes.buffer, pcmBytes.byteOffset, numSamples);
+        for (let i = 0; i < numSamples; i++) channel[i] = view[i] / 32768;
+        const node = playbackContext.createBufferSource();
+        node.buffer = buffer;
+        node.connect(playbackContext.destination);
+        const start = Math.max(nextPlayTime, now);
+        node.start(start);
+        nextPlayTime = start + buffer.duration;
+      }
+
+      const workletCode = `
+        const INPUT_SR = 16000;
+        const CHUNK_MS = 80;
+        const OUT_SAMPLES = Math.floor((INPUT_SR * CHUNK_MS) / 1000);
+        const IN_SAMPLES = OUT_SAMPLES * 3;
+        let floatBuf = [];
+        class MicResampler extends AudioWorkletProcessor {
+          process(inputs, outputs, params) {
+            const input = inputs[0]?.[0];
+            if (!input) return true;
+            for (let i = 0; i < input.length; i++) floatBuf.push(input[i]);
+            while (floatBuf.length >= IN_SAMPLES) {
+              const chunk = floatBuf.splice(0, IN_SAMPLES);
+              const out = new Int16Array(OUT_SAMPLES);
+              for (let i = 0; i < OUT_SAMPLES; i++) {
+                const srcIdx = (i * chunk.length) / OUT_SAMPLES;
+                const idx = Math.floor(srcIdx);
+                const frac = srcIdx - idx;
+                const v = idx + 1 < chunk.length
+                  ? chunk[idx] * (1 - frac) + chunk[idx + 1] * frac
+                  : chunk[idx];
+                out[i] = Math.max(-32768, Math.min(32767, Math.round(v * 32767)));
+              }
+              this.port.postMessage(out.buffer, [out.buffer]);
+            }
+            return true;
+          }
+        }
+        registerProcessor("mic-resampler", MicResampler);
+      `;
+
+      async function startCapture() {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const sampleRate = 48000;
+        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate });
+        const blob = new Blob([workletCode], { type: "application/javascript" });
+        const workletUrl = URL.createObjectURL(blob);
+        await audioContext.audioWorklet.addModule(workletUrl);
+        URL.revokeObjectURL(workletUrl);
+        captureSourceNode = audioContext.createMediaStreamSource(stream);
+        captureWorkletNode = new AudioWorkletNode(audioContext, "mic-resampler", { numberOfInputs: 1, numberOfOutputs: 1 });
+        captureWorkletNode.port.onmessage = function (e) {
+          if (ws && ws.readyState === WebSocket.OPEN) try { ws.send(e.data); } catch (_) {}
+        };
+        captureSourceNode.connect(captureWorkletNode);
+        captureWorkletNode.connect(audioContext.destination);
+        playbackContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: OUTPUT_SAMPLE_RATE });
+        nextPlayTime = 0;
+      }
+
+      function stopCapture() {
+        if (captureSourceNode) {
+          try { captureSourceNode.disconnect(); } catch (_) {}
+          captureSourceNode = null;
+        }
+        if (captureWorkletNode) {
+          try { captureWorkletNode.disconnect(); } catch (_) {}
+          captureWorkletNode = null;
+        }
+        if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+        stream = null;
+        audioContext = null;
+        playbackContext = null;
+      }
+
+      function connect() {
+        const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+        let url = protocol + "//" + location.host + "/agent/ws";
+        if (assessmentId != null) url += "?assessment_id=" + assessmentId;
+        setStatus("connecting", "Connecting…");
+        ws = new WebSocket(url);
+        ws.binaryType = "arraybuffer";
+
+        ws.onopen = function () {};
+
+        ws.onmessage = function (ev) {
+          if (typeof ev.data === "string") {
+            try {
+              const msg = JSON.parse(ev.data);
+              if (msg.status === "connected") {
+                setStatus("connected", "Connected. Speak now.");
+                setConnected(true);
+                startCapture();
+              } else if (msg.error) {
+                setStatus("error", msg.error);
+                setConnected(false);
+              } else if (msg.interrupted) {
+                nextPlayTime = 0;
+              }
+            } catch (_) {}
+            return;
+          }
+          if (ev.data instanceof ArrayBuffer && ev.data.byteLength > 0) {
+            playPCM24k(new Uint8Array(ev.data));
+          }
+        };
+
+        ws.onerror = function () {
+          setStatus("error", "Connection error");
+          setConnected(false);
+        };
+
+        ws.onclose = function () {
+          ws = null;
+          if (statusEl.className.indexOf("connected") !== -1) {
+            setStatus("idle", "Disconnected");
+          }
+          setConnected(false);
+          stopCapture();
+        };
+      }
+
+      function disconnect() {
+        if (ws) {
+          ws.close();
+          ws = null;
+        }
+        setStatus("idle", "Click Start to begin");
+        setConnected(false);
+        stopCapture();
+      }
+
+      btn.addEventListener("click", function () {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          disconnect();
+        } else {
+          connect();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
