@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import Boolean, Column, Integer, String
 from sqlalchemy.orm import relationship
 from app.db.index import Base
 
@@ -11,5 +11,8 @@ class User(Base):
     surname = Column(String, nullable=False)
     email = Column(String, unique=True, nullable=False, index=True)
     password = Column(String, nullable=False)
+    is_verified = Column(Boolean, nullable=False, default=False, server_default="false")
+    verification_token = Column(String, unique=True, nullable=True, index=True)
+    reset_password_token = Column(String, unique=True, nullable=True, index=True)
 
     assessments = relationship("Assessments", back_populates="user")
