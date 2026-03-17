@@ -28,9 +28,9 @@ steps:
       - '--set-env-vars=GEMINI_LIVE_MODEL=${_GEMINI_LIVE_MODEL},GEMINI_LIVE_VOICE=${_GEMINI_LIVE_VOICE}'
 
 substitutions:
-  _SERVICE: leadership-assessment
-  _REGION: us-central1
-  _REPO: leadership-assessment
+  _SERVICE: leadership-assessment        # Cloud Run service name
+  _REGION: europe-west4                  # Match your Cloud Run / Artifact Registry region
+  _REPO: leadership_assessment           # Exact Artifact Registry repo name
   _GEMINI_LIVE_MODEL: gemini-2.5-flash-native-audio-preview-12-2025
   _GEMINI_LIVE_VOICE: Charon
 
