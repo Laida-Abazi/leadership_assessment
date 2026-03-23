@@ -664,7 +664,6 @@ async def agent_websocket(websocket: WebSocket):
     async def read_client_audio():
         """Pump raw PCM bytes from the client WebSocket into audio_queue."""
         consecutive_errors = 0
-        unexpected_disconnects = 0
         try:
             while True:
                 try:
@@ -673,18 +672,9 @@ async def agent_websocket(websocket: WebSocket):
                     code = getattr(e, "code", 1000)
                     if code in (1000, 1001):
                         logger.info("Client closed WebSocket cleanly (code=%s).", code)
-                        break
-                    unexpected_disconnects += 1
-                    logger.warning(
-                        "Unexpected WebSocketDisconnect #%s (code=%s); keeping socket alive.",
-                        unexpected_disconnects,
-                        code,
-                    )
-                    if unexpected_disconnects >= 5:
-                        logger.error("Too many unexpected client disconnects, treating as final.")
-                        break
-                    await asyncio.sleep(0.25)
-                    continue
+                    else:
+                        logger.warning("Client WebSocket disconnected unexpectedly (code=%s).", code)
+                    break
                 except Exception as e:
                     consecutive_errors += 1
                     logger.warning("Transient receive error #%s: %s", consecutive_errors, e)
@@ -700,19 +690,10 @@ async def agent_websocket(websocket: WebSocket):
                         code = msg.get("code", 1000)
                         if code in (1000, 1001):
                             logger.info("Client disconnect frame received with normal close code=%s.", code)
-                            break
-                        unexpected_disconnects += 1
-                        logger.warning(
-                            "Unexpected disconnect frame #%s code=%s; ignoring.",
-                            unexpected_disconnects,
-                            code,
-                        )
-                        if unexpected_disconnects >= 5:
-                            logger.error("Too many unexpected disconnect frames, treating as final.")
-                            break
-                        await asyncio.sleep(0.25)
+                        else:
+                            logger.warning("Client disconnect frame received with unexpected code=%s.", code)
+                        break
                     continue
-                unexpected_disconnects = 0
                 data = msg.get("bytes")
                 if not data:
                     continue
@@ -1095,12 +1076,15 @@ async def agent_websocket(websocket: WebSocket):
                                                         await websocket.send_bytes(inline.data)
                                                     except Exception as e:
                                                         logger.warning("Failed to send audio to client: %s", e)
+                                                        signal_client_disconnect()
+                                                        return
 
                                         if getattr(sc, "interrupted", False):
                                             try:
                                                 await websocket.send_json({"interrupted": True})
                                             except Exception:
-                                                pass
+                                                signal_client_disconnect()
+                                                return
 
                                         # ── Notify client when all answers are saved (no auto-close) ──
                                         if (
@@ -1218,6 +1202,7 @@ async def agent_websocket(websocket: WebSocket):
             pass
     finally:
         try:
-            await websocket.close()
+            if not client_disconnected.is_set():
+                await websocket.close()
         except Exception:
             pass

@@ -265,6 +265,37 @@
       border-radius: 10px;
       padding: 1.25rem;
     }
+    .analysis-block {
+      padding: 0.9rem 1rem;
+      border: 1px solid rgba(124,156,255,0.18);
+      border-radius: 8px;
+      background: rgba(124,156,255,0.06);
+      margin-bottom: 0.9rem;
+    }
+    .analysis-block:last-child {
+      margin-bottom: 0;
+    }
+    .analysis-heading {
+      font-size: 0.86rem;
+      font-weight: 700;
+      color: var(--accent);
+      letter-spacing: 0.02em;
+      margin-bottom: 0.45rem;
+      text-transform: uppercase;
+    }
+    .analysis-body {
+      font-size: 0.9rem;
+      line-height: 1.7;
+      color: var(--text);
+      white-space: pre-wrap;
+    }
+    .analysis-list {
+      margin: 0.1rem 0 0;
+      padding-left: 1.15rem;
+    }
+    .analysis-list li {
+      margin-bottom: 0.35rem;
+    }
 
     /* ── Spinner / Status ── */
     .status-bar {
@@ -628,8 +659,7 @@
 
         const detail = (data.fits_and_gaps || "").trim();
         const rationale = (data.rationale || "").trim();
-        const combined = detail + (detail && rationale ? "\n\nOverall assessment:\n" : "") + rationale;
-        document.getElementById("rationaleText").textContent = combined || "No analysis details returned.";
+        document.getElementById("rationaleText").innerHTML = formatAnalysisContent(detail, rationale);
 
         hideStatus("phase4");
         document.getElementById("phase4Result").classList.add("visible");
@@ -644,6 +674,70 @@
       const d = document.createElement("div");
       d.textContent = s;
       return d.innerHTML;
+    }
+
+    function formatAnalysisContent(detail, rationale) {
+      const blocks = [];
+      if (detail) {
+        blocks.push(...parseAnalysisSections(detail));
+      }
+      if (rationale) {
+        blocks.push({
+          heading: "Overall assessment",
+          lines: [rationale],
+        });
+      }
+      if (!blocks.length) {
+        return '<div class="analysis-body">No analysis details returned.</div>';
+      }
+      return blocks.map(renderAnalysisBlock).join("");
+    }
+
+    function parseAnalysisSections(text) {
+      const sections = [];
+      const chunks = text.split(/\n{2,}/).map(s => s.trim()).filter(Boolean);
+      for (const chunk of chunks) {
+        const lines = chunk.split("\n").map(s => s.trim()).filter(Boolean);
+        if (!lines.length) continue;
+        let heading = "";
+        let contentLines = lines.slice();
+        const first = lines[0];
+        const headingMatch = first.match(/^([A-Za-z][A-Za-z0-9 \-\/&]{2,60}):\s*(.*)$/);
+        if (headingMatch) {
+          heading = headingMatch[1];
+          const rest = headingMatch[2].trim();
+          contentLines = [];
+          if (rest) contentLines.push(rest);
+          contentLines.push(...lines.slice(1));
+        } else if (lines.length === 1 && first.length <= 55) {
+          heading = first;
+          contentLines = [];
+        }
+        sections.push({
+          heading: heading || "Key insight",
+          lines: contentLines,
+        });
+      }
+      return sections;
+    }
+
+    function renderAnalysisBlock(block) {
+      const bulletLines = block.lines.filter(l => /^[-*]\s+/.test(l));
+      const plainLines = block.lines.filter(l => !/^[-*]\s+/.test(l));
+      let html = '<div class="analysis-block">';
+      html += '<div class="analysis-heading">' + escapeHtml(block.heading) + "</div>";
+      if (plainLines.length) {
+        html += '<div class="analysis-body">' + escapeHtml(plainLines.join(" ")) + "</div>";
+      }
+      if (bulletLines.length) {
+        html += '<ul class="analysis-list">';
+        for (const line of bulletLines) {
+          html += "<li>" + escapeHtml(line.replace(/^[-*]\s+/, "")) + "</li>";
+        }
+        html += "</ul>";
+      }
+      html += "</div>";
+      return html;
     }
   </script>
 </body>

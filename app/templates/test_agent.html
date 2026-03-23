@@ -131,8 +131,6 @@
       const OUTPUT_SAMPLE_RATE = 24000;
       const CHUNK_MS = 80;
       const INPUT_CHUNK_SAMPLES = Math.floor((INPUT_SAMPLE_RATE * CHUNK_MS) / 1000);
-      const MAX_RECONNECT_ATTEMPTS = 5;
-
       let ws = null;
       let stream = null;
       let audioContext = null;
@@ -141,7 +139,6 @@
       let playbackContext = null;
       let nextPlayTime = 0;
       let interviewComplete = false;
-      let reconnectAttempts = 0;
       let userDisconnected = false;
 
       function setStatus(cls, text) {
@@ -254,7 +251,6 @@
               if (msg.ping) {
                 return;
               } else if (msg.status === "connected") {
-                reconnectAttempts = 0;
                 setStatus("connected", "Connected. Speak now.");
                 setConnected(true);
                 startCapture();
@@ -291,15 +287,10 @@
             userDisconnected = false;
             return;
           }
-          if (assessmentId != null && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-            reconnectAttempts++;
-            var delay = Math.min(2000 * reconnectAttempts, 10000);
-            setStatus("connecting", "Connection lost. Reconnecting (" + reconnectAttempts + "/" + MAX_RECONNECT_ATTEMPTS + ")\u2026");
-            setTimeout(connect, delay);
-            return;
-          }
           if (statusEl.className.indexOf("connected") !== -1) {
-            setStatus("idle", "Disconnected");
+            setStatus("error", "Connection ended unexpectedly. Click Start Assessment to reconnect.");
+          } else {
+            setStatus("idle", "Click Start Assessment to begin");
           }
           setConnected(false);
         };
@@ -307,12 +298,11 @@
 
       function disconnect() {
         userDisconnected = true;
-        reconnectAttempts = 0;
         if (ws) {
           ws.close();
           ws = null;
         }
-        setStatus("idle", "Click Start to begin");
+        setStatus("idle", "Click Start Assessment to begin");
         setConnected(false);
         stopCapture();
       }
