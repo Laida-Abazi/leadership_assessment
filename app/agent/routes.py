@@ -14,7 +14,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
 from app.db import SessionLocal
-from app.db.models import Assessments, Responses
+from app.db.models import Assessments, Responses, User
 
 logger = logging.getLogger(__name__)
 
@@ -121,10 +121,15 @@ def _get_saved_response_count(assessment_id: int, response_field_order: list[str
         db.close()
 
 
-def _build_interview_system_instruction(questions: list[str], resumed: bool = False) -> str:
+def _build_interview_system_instruction(
+    questions: list[str],
+    resumed: bool = False,
+    candidate_name: str | None = None,
+) -> str:
     """Build system instruction for conducting the assessment interview."""
     if not questions:
         return DEFAULT_SYSTEM_INSTRUCTION
+    clean_name = (candidate_name or "").strip()
     lines = [
         "You are conducting a structured leadership assessment interview as a professional, warm voice interviewer.",
         "",
@@ -138,11 +143,16 @@ def _build_interview_system_instruction(questions: list[str], resumed: bool = Fa
             "'Welcome back! Let's pick up where we left off.' Then proceed with the first question below."
         )
     else:
-        lines.append(
-            "- Start with a welcoming introduction: Greet them by name if provided (e.g., 'Hello, John!'), "
-            "ask how their day's going, reassure them it's a casual conversation, and mention you'll ask a "
-            "series of questions to learn about their leadership style."
-        )
+        if clean_name:
+            lines.append(
+                f"- Start with a warm introduction and greet them by name: '{clean_name}'. "
+                "Ask how their day is going, wait for a brief response, and reassure them this is a casual conversation."
+            )
+        else:
+            lines.append(
+                "- Start with a warm introduction, ask how their day is going, wait for a brief response, "
+                "and reassure them this is a casual conversation."
+            )
     lines += [
         "- Ask exactly the question text below for each step; you may rephrase slightly for natural speech only if needed.",
         "- After the candidate answers, acknowledge warmly and briefly, then ask the next question smoothly.",
@@ -548,19 +558,27 @@ async def agent_websocket(websocket: WebSocket):
     response_field_order: list[str] = []
     already_saved = 0
     questions = []
+    candidate_name: str | None = None
 
     if assessment_id is not None:
         db = SessionLocal()
         try:
             assessment = db.get(Assessments, assessment_id)
             if assessment:
+                user = db.get(User, assessment.user_id)
+                if user:
+                    candidate_name = f"{(user.name or '').strip()} {(user.surname or '').strip()}".strip() or None
                 questions = _assessment_questions_list(assessment)
                 response_field_order = _response_fields_for_assessment(assessment)
                 already_saved = _get_saved_response_count(assessment_id, response_field_order)
                 remaining_questions = questions[already_saved:]
                 resumed = already_saved > 0
                 if remaining_questions:
-                    system_instruction = _build_interview_system_instruction(remaining_questions, resumed=resumed)
+                    system_instruction = _build_interview_system_instruction(
+                        remaining_questions,
+                        resumed=resumed,
+                        candidate_name=candidate_name,
+                    )
                 else:
                     logger.info("All %d questions already answered for assessment_id=%s", len(questions), assessment_id)
                 logger.info(
@@ -598,6 +616,23 @@ async def agent_websocket(websocket: WebSocket):
     answer_state: dict = {"current_index": already_saved, "transcript": ""}
     MIN_TRANSCRIPT_LEN = 20
 
+    def signal_client_disconnect() -> None:
+        """Mark the client as gone and wake any Gemini pump waiting on audio."""
+        if client_disconnected.is_set():
+            return
+        client_disconnected.set()
+        try:
+            audio_queue.put_nowait(None)
+        except asyncio.QueueFull:
+            try:
+                audio_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                audio_queue.put_nowait(None)
+            except asyncio.QueueFull:
+                logger.warning("Could not enqueue disconnect sentinel; audio queue remained full.")
+
     def _build_config_for_current_state() -> dict:
         """Rebuild system instruction based on how many answers have been saved so far."""
         cfg = {
@@ -613,7 +648,11 @@ async def agent_websocket(websocket: WebSocket):
             remaining = questions[saved:]
             resumed = saved > 0
             if remaining:
-                cfg["system_instruction"] = _build_interview_system_instruction(remaining, resumed=resumed)
+                cfg["system_instruction"] = _build_interview_system_instruction(
+                    remaining,
+                    resumed=resumed,
+                    candidate_name=candidate_name,
+                )
             else:
                 cfg["system_instruction"] = system_instruction
             cfg["input_audio_transcription"] = types.AudioTranscriptionConfig()
@@ -624,13 +663,56 @@ async def agent_websocket(websocket: WebSocket):
     # ── Task: read client WebSocket → audio_queue ───────────────────────────────
     async def read_client_audio():
         """Pump raw PCM bytes from the client WebSocket into audio_queue."""
+        consecutive_errors = 0
+        unexpected_disconnects = 0
         try:
             while True:
-                msg = await websocket.receive()
-                if msg.get("type") == "websocket.disconnect":
-                    break
-                if msg.get("type") != "websocket.receive":
+                try:
+                    msg = await websocket.receive()
+                except WebSocketDisconnect as e:
+                    code = getattr(e, "code", 1000)
+                    if code in (1000, 1001):
+                        logger.info("Client closed WebSocket cleanly (code=%s).", code)
+                        break
+                    unexpected_disconnects += 1
+                    logger.warning(
+                        "Unexpected WebSocketDisconnect #%s (code=%s); keeping socket alive.",
+                        unexpected_disconnects,
+                        code,
+                    )
+                    if unexpected_disconnects >= 5:
+                        logger.error("Too many unexpected client disconnects, treating as final.")
+                        break
+                    await asyncio.sleep(0.25)
                     continue
+                except Exception as e:
+                    consecutive_errors += 1
+                    logger.warning("Transient receive error #%s: %s", consecutive_errors, e)
+                    if consecutive_errors >= 5:
+                        logger.error("Too many consecutive receive errors, treating as disconnect.")
+                        break
+                    await asyncio.sleep(0.1)
+                    continue
+
+                consecutive_errors = 0
+                if msg.get("type") != "websocket.receive":
+                    if msg.get("type") == "websocket.disconnect":
+                        code = msg.get("code", 1000)
+                        if code in (1000, 1001):
+                            logger.info("Client disconnect frame received with normal close code=%s.", code)
+                            break
+                        unexpected_disconnects += 1
+                        logger.warning(
+                            "Unexpected disconnect frame #%s code=%s; ignoring.",
+                            unexpected_disconnects,
+                            code,
+                        )
+                        if unexpected_disconnects >= 5:
+                            logger.error("Too many unexpected disconnect frames, treating as final.")
+                            break
+                        await asyncio.sleep(0.25)
+                    continue
+                unexpected_disconnects = 0
                 data = msg.get("bytes")
                 if not data:
                     continue
@@ -643,15 +725,29 @@ async def agent_websocket(websocket: WebSocket):
                     except asyncio.QueueEmpty:
                         pass
                     audio_queue.put_nowait(data)
-        except WebSocketDisconnect:
-            pass
         except Exception as e:
             logger.exception("Error reading client audio: %s", e)
         finally:
-            # Sentinel: tells the Gemini pump to stop
-            await audio_queue.put(None)
-            client_disconnected.set()
+            # Sentinel: tells the Gemini pump to stop.
+            signal_client_disconnect()
             logger.info("Client disconnected / read_client_audio finished.")
+
+    async def keepalive_client():
+        """Send periodic JSON pings so proxies keep the client WebSocket open."""
+        while not client_disconnected.is_set():
+            await asyncio.sleep(20)
+            if client_disconnected.is_set():
+                break
+            try:
+                await websocket.send_json({"ping": True})
+            except WebSocketDisconnect as e:
+                logger.info("Client disconnected during keepalive (code=%s).", getattr(e, "code", None))
+                signal_client_disconnect()
+                break
+            except Exception as e:
+                logger.warning("Client keepalive failed; treating socket as disconnected: %s", e)
+                signal_client_disconnect()
+                break
 
     # ── Gemini session loop (reconnects on transient failures) ──────────────────
     async def gemini_session_loop():
@@ -1106,6 +1202,7 @@ async def agent_websocket(websocket: WebSocket):
         top_tasks = [
             asyncio.create_task(read_client_audio(), name="read-client"),
             asyncio.create_task(gemini_session_loop(), name="gemini-loop"),
+            asyncio.create_task(keepalive_client(), name="keepalive-client"),
         ]
 
         # Wait until BOTH the client reader AND the Gemini loop finish.

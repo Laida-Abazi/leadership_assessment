@@ -240,25 +240,22 @@
       margin-bottom: 0.15rem;
     }
 
-    /* ── Verdict ── */
+    /* ── Gap Analysis ── */
     .verdict-card {
-      text-align: center;
+      text-align: left;
       padding: 2rem;
     }
-    .verdict-badge {
-      display: inline-block;
-      font-size: 1.1rem;
-      font-weight: 700;
-      padding: 0.6rem 1.5rem;
-      border-radius: 10px;
-      margin-bottom: 1.25rem;
-      letter-spacing: 0.03em;
+    .analysis-title {
+      font-size: 1rem;
+      font-weight: 600;
+      margin-bottom: 0.75rem;
+      color: var(--accent);
     }
-    .verdict-STRONG_FIT { background: var(--success-dim); color: var(--success); }
-    .verdict-FIT { background: var(--success-dim); color: var(--success); }
-    .verdict-MODERATE_FIT { background: var(--warning-dim); color: var(--warning); }
-    .verdict-WEAK_FIT { background: rgba(224,124,124,0.12); color: var(--danger); }
-    .verdict-NOT_RECOMMENDED { background: rgba(224,124,124,0.2); color: var(--danger); }
+    .analysis-subtitle {
+      font-size: 0.82rem;
+      color: var(--muted);
+      margin-bottom: 0.9rem;
+    }
     .rationale-text {
       font-size: 0.92rem;
       line-height: 1.65;
@@ -423,7 +420,7 @@
   <!-- Phase 4: Prediction -->
   <div class="card" id="phase4">
     <h2>Prediction</h2>
-    <p class="desc">Run the fits-and-gaps analysis and get a final hiring prediction for this candidate.</p>
+    <p class="desc">Run a detailed gap analysis of the interview against role requirements.</p>
     <div class="form-group">
       <label for="assessmentIdPred">Assessment ID</label>
       <input type="number" id="assessmentIdPred" readonly>
@@ -438,7 +435,8 @@
     </div>
     <div class="result-panel" id="phase4Result">
       <div class="verdict-card">
-        <div id="verdictBadge" class="verdict-badge"></div>
+        <div class="analysis-title">Detailed Gap Analysis</div>
+        <div class="analysis-subtitle">Evidence-based strengths, gaps, and risk implications</div>
         <div id="rationaleText" class="rationale-text"></div>
       </div>
     </div>
@@ -628,11 +626,10 @@
         }
         const data = await res.json();
 
-        const badge = document.getElementById("verdictBadge");
-        badge.textContent = data.verdict.replace(/_/g, " ");
-        badge.className = "verdict-badge verdict-" + data.verdict;
-
-        document.getElementById("rationaleText").textContent = data.rationale;
+        const detail = (data.fits_and_gaps || "").trim();
+        const rationale = (data.rationale || "").trim();
+        const combined = detail + (detail && rationale ? "\n\nOverall assessment:\n" : "") + rationale;
+        document.getElementById("rationaleText").textContent = combined || "No analysis details returned.";
 
         hideStatus("phase4");
         document.getElementById("phase4Result").classList.add("visible");

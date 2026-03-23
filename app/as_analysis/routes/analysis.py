@@ -33,8 +33,8 @@ FITS_GAPS_PROMPT = """You are an expert leadership assessor. You will be given:
 2) A set of interview questions that were asked and the candidate's responses.
 
 Your task is to analyze each question–response pair against the job requirements and produce:
-A) A "fits and gaps" summary: for each topic, what aligned well (fits) and what was missing or weak (gaps).
-B) A final prediction on whether this leader is right for the position.
+A) A detailed gap analysis: for each major competency/theme, explain evidence of fit, specific gaps, risk implications, and what additional evidence would increase confidence.
+B) A final internal prediction on whether this leader is right for the position.
 
 Job requirements:
 ---
@@ -47,9 +47,9 @@ Interview Q&A (question type, question, candidate response):
 ---
 
 Return ONLY a valid JSON object with exactly these keys (no other text):
-- "fits_and_gaps": (string) A clear, structured narrative summarizing fits (where the candidate aligned with requirements) and gaps (where they fell short or were unclear). Organize by theme (e.g. leadership, experience, culture fit) where it makes sense.
+- "fits_and_gaps": (string) A detailed, structured narrative with section-like flow. Include concrete evidence from answers, missing evidence, severity of each gap, and practical implications for role success.
 - "verdict": (string) Exactly one of: STRONG_FIT, FIT, MODERATE_FIT, WEAK_FIT, NOT_RECOMMENDED.
-- "rationale": (string) A concise 2–4 sentence explanation for the verdict, referring to key fits and gaps.
+- "rationale": (string) A concise explanation for the verdict that references the most critical evidence and gaps.
 
 Return only the JSON object."""
 

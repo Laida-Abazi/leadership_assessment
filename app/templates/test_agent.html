@@ -102,7 +102,7 @@
     <h1>Voice agent</h1>
     <p class="sub" id="sub">Have a friendly conversation with the assistant</p>
     <div id="status" class="status idle">Click Start to begin</div>
-    <button id="btn" class="primary">Start conversation</button>
+    <button id="btn" class="primary">Start Assessment</button>
     <p class="hint" id="hint">Allow microphone access. Speak after you see “Connected”. The agent will reply with voice.</p>
   </main>
   <script>
@@ -150,7 +150,7 @@
       }
 
       function setConnected(connected) {
-        btn.textContent = connected ? "End conversation" : "Start conversation";
+        btn.textContent = connected ? "Finish Assessment" : "Start Assessment";
         btn.className = connected ? "danger" : "primary";
       }
 
@@ -251,13 +251,15 @@
           if (typeof ev.data === "string") {
             try {
               const msg = JSON.parse(ev.data);
-              if (msg.status === "connected") {
+              if (msg.ping) {
+                return;
+              } else if (msg.status === "connected") {
                 reconnectAttempts = 0;
                 setStatus("connected", "Connected. Speak now.");
                 setConnected(true);
                 startCapture();
               } else if (msg.answers_saved) {
-                setStatus("connected", "All answers saved. Click \"End conversation\" when ready.");
+                setStatus("connected", "All answers saved. Click \"Finish Assessment\" when ready.");
                 return;
               } else if (msg.gemini_disconnected) {
                 setStatus("connecting", "Session interrupted, reconnecting\u2026");
