@@ -5,6 +5,7 @@ and structured assessment interviews.
 import asyncio
 import logging
 import os
+import re
 import socket
 from pathlib import Path
 from typing import Optional
@@ -77,10 +78,10 @@ def _save_response_for_question(
     response_field_order: list[str],
     current_index: int,
     answer_text: str,
-) -> None:
+) -> bool:
     """Get or create Responses row for assessment and set the given question index to answer_text."""
     if current_index < 0 or current_index >= len(response_field_order):
-        return
+        return False
     field_name = response_field_order[current_index]
     db = SessionLocal()
     try:
@@ -95,9 +96,11 @@ def _save_response_for_question(
             setattr(row, field_name, (answer_text or "").strip() or None)
         db.commit()
         logger.info("Saved response for assessment_id=%s field=%s index=%s", assessment_id, field_name, current_index)
+        return True
     except Exception as e:
         logger.exception("Failed to save response: %s", e)
         db.rollback()
+        return False
     finally:
         db.close()
 
@@ -125,6 +128,7 @@ def _build_interview_system_instruction(
     questions: list[str],
     resumed: bool = False,
     candidate_name: str | None = None,
+    start_number: int = 1,
 ) -> str:
     """Build system instruction for conducting the assessment interview."""
     if not questions:
@@ -139,21 +143,27 @@ def _build_interview_system_instruction(
     ]
     if resumed:
         lines.append(
-            "- The interview was briefly interrupted. Continue smoothly: say something like "
-            "'Welcome back! Let's pick up where we left off.' Then proceed with the first question below."
+            "- The interview may resume on a fresh backend session. Continue seamlessly and naturally without mentioning "
+            "any interruption, reconnection, restart, or saying things like 'Welcome back'. Simply proceed with the next "
+            "question below as if the conversation had been continuous."
         )
     else:
         if clean_name:
             lines.append(
                 f"- Start with a warm introduction and greet them by name: '{clean_name}'. "
-                "Ask how their day is going, wait for a brief response, and reassure them this is a casual conversation."
+                "Ask how their day is going, wait for a brief response, and reassure them this is a casual conversation. "
+                "Treat this opening exchange as warm-up only; after that, start the formal assessment with Question 1 in a new turn."
             )
         else:
             lines.append(
                 "- Start with a warm introduction, ask how their day is going, wait for a brief response, "
-                "and reassure them this is a casual conversation."
+                "and reassure them this is a casual conversation. Treat this opening exchange as warm-up only; "
+                "after that, start the formal assessment with Question 1 in a new turn."
             )
     lines += [
+        "- Start every formal assessment question with the exact spoken prefix 'Question N:' where N is the question number below.",
+        "- If you need clarification for the same question, start with the exact spoken prefix 'Follow-up on Question N:'.",
+        "- Only move to the next numbered question after you are satisfied the current numbered question has been answered.",
         "- Ask exactly the question text below for each step; you may rephrase slightly for natural speech only if needed.",
         "- After the candidate answers, acknowledge warmly and briefly, then ask the next question smoothly.",
         "- Sprinkle in light reassurance as needed (e.g., 'No right or wrong answers here—just your thoughts').",
@@ -163,7 +173,7 @@ def _build_interview_system_instruction(
         "",
         "Questions to ask (in this order):",
     ]
-    for i, q in enumerate(questions, 1):
+    for i, q in enumerate(questions, start_number):
         lines.append(f"{i}. {q}")
     return "\n".join(lines)
 
@@ -177,364 +187,6 @@ def serve_test_agent_page():
     return FileResponse(path)
 
 
-# @router.websocket("/ws")
-# async def agent_websocket(websocket: WebSocket):
-#     """
-#     WebSocket proxy to Gemini Live API.
-#     - Query param assessment_id (optional): if set, the agent runs the assessment interview,
-#       asking each of that assessment's questions one by one.
-#     - Client sends binary: raw 16-bit PCM audio at 16 kHz, mono (no header).
-#     - Server sends binary: raw 16-bit PCM audio at 24 kHz, mono (no header).
-#     """
-#     await websocket.accept()
-
-#     # Optional assessment_id from query string (e.g. ?assessment_id=1)
-#     assessment_id: Optional[int] = None
-#     raw = websocket.query_params.get("assessment_id")
-#     if raw:
-#         try:
-#             assessment_id = int(raw)
-#         except ValueError:
-#             pass
-
-#     # Resolve system instruction and response-field order: interview mode if assessment_id given.
-#     system_instruction = DEFAULT_SYSTEM_INSTRUCTION
-#     response_field_order: list[str] = []
-#     already_saved = 0
-#     if assessment_id is not None:
-#         db = SessionLocal()
-#         try:
-#             assessment = db.get(Assessments, assessment_id)
-#             if assessment:
-#                 questions = _assessment_questions_list(assessment)
-#                 response_field_order = _response_fields_for_assessment(assessment)
-#                 already_saved = _get_saved_response_count(assessment_id, response_field_order)
-#                 remaining_questions = questions[already_saved:]
-#                 resumed = already_saved > 0
-#                 if remaining_questions:
-#                     system_instruction = _build_interview_system_instruction(remaining_questions, resumed=resumed)
-#                 else:
-#                     logger.info("All %d questions already answered for assessment_id=%s", len(questions), assessment_id)
-#                 logger.info(
-#                     "Agent starting assessment interview id=%s with %s questions (%s already answered, %s remaining)",
-#                     assessment_id, len(questions), already_saved, len(remaining_questions),
-#                 )
-#             else:
-#                 logger.warning("Assessment id=%s not found, using default instruction", assessment_id)
-#         finally:
-#             db.close()
-
-#     try:
-#         from google import genai
-#         from google.genai import types
-#     except ImportError:
-#         logger.exception("google-genai not installed")
-#         await websocket.send_json({"error": "Server missing google-genai. Install with: pip install google-genai"})
-#         await websocket.close()
-#         return
-
-#     api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-#     if not api_key:
-#         await websocket.send_json({"error": "GOOGLE_API_KEY or GEMINI_API_KEY not set"})
-#         await websocket.close()
-#         return
-
-#     client = genai.Client(api_key=api_key)
-#     config = {
-#         "response_modalities": ["AUDIO"],
-#         "system_instruction": system_instruction,
-#         "speech_config": {
-#             "voice_config": {
-#                 "prebuilt_voice_config": {"voice_name": "Orus"},
-#             },
-#         },
-#     }
-#     # Enable input transcription so we receive server_content.input_transcription (required to save answers).
-#     if assessment_id is not None:
-#         config["input_audio_transcription"] = types.AudioTranscriptionConfig()
-#         if response_field_order:
-#             logger.info(
-#                 "Response saving enabled: assessment_id=%s, response_field_order=%s",
-#                 assessment_id,
-#                 response_field_order,
-#             )
-#         else:
-#             logger.warning(
-#                 "Assessment id=%s has no non-empty questions; response_field_order is empty. "
-#                 "Generate questions for this assessment (POST /assessments/generate) so answers can be saved.",
-#                 assessment_id,
-#             )
-
-#     try:
-#         async with client.aio.live.connect(model=LIVE_MODEL, config=config) as session:
-#             # Send initial silent audio immediately so Gemini doesn't close
-#             # the session due to inactivity before the client mic is ready.
-#             silent_frame = b'\x00' * 3200
-#             await session.send_realtime_input(
-#                 audio=types.Blob(data=silent_frame, mime_type="audio/pcm;rate=16000")
-#             )
-
-#             # Notify client that we're connected and ready
-#             await websocket.send_json({"status": "connected", "model": LIVE_MODEL})
-
-#             async def forward_client_to_gemini():
-#                 try:
-#                     while True:
-#                         msg = await websocket.receive()
-#                         if msg.get("type") == "websocket.disconnect":
-#                             break
-#                         if msg.get("type") != "websocket.receive":
-#                             continue
-#                         data = msg.get("bytes")
-#                         if not data:
-#                             continue
-#                         await session.send_realtime_input(
-#                             audio=types.Blob(data=data, mime_type="audio/pcm;rate=16000")
-#                         )
-#                 except WebSocketDisconnect:
-#                     pass
-#                 except websockets.exceptions.ConnectionClosedError:
-#                     logger.info("Gemini connection closed while forwarding client audio (session ended).")
-#                 except asyncio.CancelledError:
-#                     pass
-#                 except Exception as e:
-#                     logger.exception("Error forwarding client audio to Gemini: %s", e)
-#                 finally:
-#                     client_disconnected.set()
-
-#             async def keep_alive_gemini():
-#                 """Send periodic silent audio to prevent Gemini idle timeout."""
-#                 keep_alive_frame = b'\x00' * 3200
-#                 try:
-#                     while True:
-#                         await asyncio.sleep(1)
-#                         try:
-#                             await session.send_realtime_input(
-#                                 audio=types.Blob(data=keep_alive_frame, mime_type="audio/pcm;rate=16000")
-#                             )
-#                         except Exception as e:
-#                             logger.debug("Keep-alive send failed (session likely closed): %s", e)
-#                             break
-#                 except asyncio.CancelledError:
-#                     pass
-
-#             # State for mapping interview answers to response table (only used when assessment_id set).
-#             answer_state: dict = {"current_index": already_saved, "transcript": ""}
-#             _logged_sc_keys = False
-#             interview_complete = asyncio.Event()
-#             client_disconnected = asyncio.Event()
-#             MIN_TRANSCRIPT_LEN = 20
-
-#             async def forward_gemini_to_client():
-#                 nonlocal _logged_sc_keys
-#                 try:
-#                     async for message in session.receive():
-#                         try:
-#                             # Log full message structure for debugging on first few messages
-#                             if not _logged_sc_keys:
-#                                 try:
-#                                     msg_dump = getattr(message, "model_dump", lambda **kw: {})(exclude_none=True)
-#                                     logger.info("Gemini raw message keys: %s", list(msg_dump.keys()))
-#                                 except Exception:
-#                                     logger.info("Gemini message type: %s, attrs: %s", type(message).__name__, [a for a in dir(message) if not a.startswith('_')])
-
-#                             # Detect go_away signal (Gemini warning before session close)
-#                             go_away = getattr(message, "go_away", None)
-#                             if go_away is not None:
-#                                 logger.warning("Gemini sent go_away signal (session will close): %s", go_away)
-
-#                             if not hasattr(message, "server_content") or message.server_content is None:
-#                                 if not _logged_sc_keys:
-#                                     logger.info("Gemini message without server_content (setup/config): %s", type(message).__name__)
-#                                 continue
-#                             sc = message.server_content
-
-#                             if assessment_id is not None and not _logged_sc_keys:
-#                                 try:
-#                                     payload = getattr(sc, "model_dump", lambda **kw: {})(exclude_none=True)
-#                                     logger.info("Live server_content keys (first time): %s", list(payload.keys()))
-#                                 except Exception:
-#                                     pass
-#                                 _logged_sc_keys = True
-
-#                             if assessment_id is not None and response_field_order:
-#                                 inp = getattr(sc, "input_transcription", None)
-#                                 if inp is not None:
-#                                     text = getattr(inp, "text", None) or ""
-#                                     finished = getattr(inp, "finished", False)
-#                                     if text:
-#                                         answer_state["transcript"] = (
-#                                             (answer_state["transcript"] or "") + text
-#                                         ).strip()
-#                                     if finished and answer_state["transcript"]:
-#                                         idx = answer_state["current_index"]
-#                                         if idx < len(response_field_order):
-#                                             logger.info(
-#                                                 "Saving response (finished=True): assessment_id=%s index=%s field=%s",
-#                                                 assessment_id, idx, response_field_order[idx],
-#                                             )
-#                                             _save_response_for_question(
-#                                                 assessment_id,
-#                                                 response_field_order,
-#                                                 idx,
-#                                                 answer_state["transcript"],
-#                                             )
-#                                             answer_state["current_index"] = idx + 1
-#                                         answer_state["transcript"] = ""
-
-#                             model_turn = getattr(sc, "model_turn", None)
-#                             idx = answer_state["current_index"]
-#                             if (
-#                                 assessment_id is not None
-#                                 and response_field_order
-#                                 and model_turn is not None
-#                                 and answer_state["transcript"]
-#                                 and len(answer_state["transcript"]) >= MIN_TRANSCRIPT_LEN
-#                             ):
-#                                 if idx < len(response_field_order):
-#                                     logger.info(
-#                                         "Saving response (model_turn): assessment_id=%s index=%s field=%s len=%s",
-#                                         assessment_id, idx, response_field_order[idx], len(answer_state["transcript"]),
-#                                     )
-#                                     _save_response_for_question(
-#                                         assessment_id,
-#                                         response_field_order,
-#                                         idx,
-#                                         answer_state["transcript"],
-#                                     )
-#                                     answer_state["current_index"] = idx + 1
-#                                 answer_state["transcript"] = ""
-
-#                             parts = None
-#                             if model_turn and getattr(model_turn, "parts", None):
-#                                 parts = model_turn.parts
-#                             if not parts and getattr(sc, "parts", None):
-#                                 parts = sc.parts
-#                             if parts:
-#                                 for part in parts:
-#                                     inline = getattr(part, "inline_data", None)
-#                                     if inline and getattr(inline, "data", None):
-#                                         try:
-#                                             await websocket.send_bytes(inline.data)
-#                                         except Exception as e:
-#                                             logger.warning("Failed to send audio to client: %s", e)
-#                             if getattr(sc, "interrupted", False):
-#                                 try:
-#                                     await websocket.send_json({"interrupted": True})
-#                                 except Exception:
-#                                     pass
-
-#                             # Check if all interview questions have been answered.
-#                             if (
-#                                 assessment_id is not None
-#                                 and response_field_order
-#                                 and answer_state["current_index"] >= len(response_field_order)
-#                                 and getattr(sc, "turn_complete", False)
-#                             ):
-#                                 logger.info(
-#                                     "Interview complete: all %s responses saved for assessment_id=%s",
-#                                     len(response_field_order), assessment_id,
-#                                 )
-#                                 interview_complete.set()
-
-#                         except Exception as e:
-#                             logger.warning("Error handling Gemini message: %s", e)
-#                     # Receive loop ended -- try to get close reason from underlying websocket
-#                     try:
-#                         ws_inner = getattr(session, "_ws", None) or getattr(session, "ws", None)
-#                         close_code = getattr(ws_inner, "close_code", "?")
-#                         close_reason = getattr(ws_inner, "close_reason", "?")
-#                         logger.info(
-#                             "Gemini receive loop ended (session closed). close_code=%s reason=%s",
-#                             close_code, close_reason,
-#                         )
-#                     except Exception:
-#                         logger.info("Gemini receive loop ended normally (Gemini closed the session).")
-#                 except asyncio.CancelledError:
-#                     pass
-#                 except websockets.exceptions.ConnectionClosedError as e:
-#                     if interview_complete.is_set() or (
-#                         assessment_id is not None
-#                         and response_field_order
-#                         and answer_state["current_index"] >= len(response_field_order)
-#                     ):
-#                         logger.info("Gemini session closed after interview completed (expected).")
-#                     else:
-#                         logger.warning("Gemini session closed unexpectedly (code=%s reason=%s): %s", e.code, e.reason, e)
-#                 except Exception as e:
-#                     logger.exception("Error receiving from Gemini: %s", e)
-
-#             async def close_after_interview():
-#                 """Wait for interview completion, let the final audio drain, then close cleanly."""
-#                 await interview_complete.wait()
-#                 await asyncio.sleep(8)
-#                 logger.info("Closing session after interview completion cooldown.")
-#                 try:
-#                     await websocket.send_json({"interview_complete": True})
-#                 except Exception:
-#                     pass
-#                 try:
-#                     await websocket.close()
-#                 except Exception:
-#                     pass
-
-#             tasks = [
-#                 asyncio.create_task(forward_client_to_gemini(), name="client->gemini"),
-#                 asyncio.create_task(forward_gemini_to_client(), name="gemini->client"),
-#                 asyncio.create_task(keep_alive_gemini(), name="keep-alive"),
-#             ]
-#             if assessment_id is not None and response_field_order:
-#                 tasks.append(asyncio.create_task(close_after_interview(), name="interview-closer"))
-
-#             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-#             for t in done:
-#                 name = t.get_name()
-#                 if not t.cancelled():
-#                     exc = t.exception() if not t.cancelled() else None
-#                     if exc:
-#                         logger.warning("Task '%s' ended with error: %s", name, exc)
-#                     else:
-#                         logger.info("Task '%s' completed first", name)
-
-#             if not client_disconnected.is_set() and not interview_complete.is_set():
-#                 logger.warning(
-#                     "Gemini session ended before interview complete (answered %s/%s). "
-#                     "Client should reconnect to resume.",
-#                     answer_state["current_index"], len(response_field_order),
-#                 )
-#                 try:
-#                     await websocket.send_json({"gemini_disconnected": True})
-#                 except Exception:
-#                     pass
-
-#             for t in pending:
-#                 t.cancel()
-#             for t in pending:
-#                 try:
-#                     await t
-#                 except asyncio.CancelledError:
-#                     pass
-#     except socket.gaierror as e:
-#         msg = (
-#             "Cannot reach Gemini API (DNS/network failed). "
-#             "Check internet connection and DNS. If behind a proxy, set HTTPS_PROXY."
-#         )
-#         logger.exception("Gemini Live session error (network): %s", e)
-#         try:
-#             await websocket.send_json({"error": msg})
-#         except Exception:
-#             pass
-#     except Exception as e:
-#         logger.exception("Gemini Live session error: %s", e)
-#         try:
-#             await websocket.send_json({"error": str(e)})
-#         except Exception:
-#             pass
-#     finally:
-#         try:
-#             await websocket.close()
-#         except Exception:
-#             pass
 
 @router.websocket("/ws")
 async def agent_websocket(websocket: WebSocket):
@@ -578,6 +230,7 @@ async def agent_websocket(websocket: WebSocket):
                         remaining_questions,
                         resumed=resumed,
                         candidate_name=candidate_name,
+                        start_number=already_saved + 1,
                     )
                 else:
                     logger.info("All %d questions already answered for assessment_id=%s", len(questions), assessment_id)
@@ -613,7 +266,14 @@ async def agent_websocket(websocket: WebSocket):
     # Gemini session is currently active (including across reconnects).
     audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=200)
 
-    answer_state: dict = {"current_index": already_saved, "transcript": ""}
+    answer_state: dict = {
+        "current_index": already_saved,
+        "transcript": "",
+        "discard_intro_reply": bool(assessment_id is not None and response_field_order and already_saved == 0),
+        "question_open": False,
+        "user_turn_finished": False,
+        "output_transcript": "",
+    }
     MIN_TRANSCRIPT_LEN = 20
 
     def signal_client_disconnect() -> None:
@@ -652,13 +312,59 @@ async def agent_websocket(websocket: WebSocket):
                     remaining,
                     resumed=resumed,
                     candidate_name=candidate_name,
+                    start_number=saved + 1,
                 )
             else:
                 cfg["system_instruction"] = system_instruction
             cfg["input_audio_transcription"] = types.AudioTranscriptionConfig()
+            cfg["output_audio_transcription"] = types.AudioTranscriptionConfig()
         else:
             cfg["system_instruction"] = system_instruction
         return cfg
+
+    def _finalize_current_answer(reason: str, min_length: int = 0) -> bool:
+        """Persist the current answer once and block late transcript spillover."""
+        transcript = (answer_state["transcript"] or "").strip()
+        idx = answer_state["current_index"]
+        if not transcript:
+            return False
+        if min_length and len(transcript) < min_length:
+            return False
+        if idx >= len(response_field_order):
+            answer_state["transcript"] = ""
+            return False
+
+        logger.info(
+            "Saving response (%s): assessment_id=%s index=%s field=%s len=%s",
+            reason,
+            assessment_id,
+            idx,
+            response_field_order[idx],
+            len(transcript),
+        )
+        saved = _save_response_for_question(
+            assessment_id,
+            response_field_order,
+            idx,
+            transcript,
+        )
+        if saved:
+            answer_state["current_index"] = idx + 1
+            answer_state["transcript"] = ""
+            answer_state["user_turn_finished"] = False
+        return saved
+
+    def _extract_question_marker(text: str) -> tuple[str | None, int | None]:
+        """Parse machine-readable spoken markers like 'Question 2:' or 'Follow-up on Question 2:'."""
+        if not text:
+            return None, None
+        match = re.search(r"\bfollow[- ]up on question\s+(\d+)\b", text, flags=re.IGNORECASE)
+        if match:
+            return "followup", int(match.group(1))
+        match = re.search(r"\bquestion\s+(\d+)\b", text, flags=re.IGNORECASE)
+        if match:
+            return "question", int(match.group(1))
+        return None, None
 
     # ── Task: read client WebSocket → audio_queue ───────────────────────────────
     async def read_client_audio():
@@ -770,6 +476,7 @@ async def agent_websocket(websocket: WebSocket):
 
             try:
                 async with client.aio.live.connect(model=LIVE_MODEL, config=config) as session:
+                    session_rotation_requested = False
                     # Send a silent frame immediately so Gemini doesn't time out
                     # before the client starts speaking.
                     silent_frame = b'\x00' * 3200
@@ -825,149 +532,7 @@ async def agent_websocket(websocket: WebSocket):
                                     pass
                                 break
 
-                    # ── Sub-task: Gemini → client WebSocket ─────────────────────
-                    # async def receive_from_gemini():
-                    #     nonlocal _logged_sc_keys
-                    #     try:
-                    #         async for message in session.receive():
-                    #             try:
-                    #                 if not _logged_sc_keys:
-                    #                     try:
-                    #                         msg_dump = getattr(message, "model_dump", lambda **kw: {})(exclude_none=True)
-                    #                         logger.info("Gemini raw message keys: %s", list(msg_dump.keys()))
-                    #                     except Exception:
-                    #                         logger.info(
-                    #                             "Gemini message type: %s attrs: %s",
-                    #                             type(message).__name__,
-                    #                             [a for a in dir(message) if not a.startswith('_')],
-                    #                         )
-
-                    #                 go_away = getattr(message, "go_away", None)
-                    #                 if go_away is not None:
-                    #                     logger.warning("Gemini sent go_away signal: %s", go_away)
-
-                    #                 if not hasattr(message, "server_content") or message.server_content is None:
-                    #                     if not _logged_sc_keys:
-                    #                         logger.info(
-                    #                             "Gemini message without server_content: %s", type(message).__name__
-                    #                         )
-                    #                     continue
-
-                    #                 sc = message.server_content
-
-                    #                 if assessment_id is not None and not _logged_sc_keys:
-                    #                     try:
-                    #                         payload = getattr(sc, "model_dump", lambda **kw: {})(exclude_none=True)
-                    #                         logger.info("Live server_content keys (first time): %s", list(payload.keys()))
-                    #                     except Exception:
-                    #                         pass
-                    #                     _logged_sc_keys = True
-
-                    #                 # ── Transcription → save answer ─────────────
-                    #                 if assessment_id is not None and response_field_order:
-                    #                     inp = getattr(sc, "input_transcription", None)
-                    #                     if inp is not None:
-                    #                         text = getattr(inp, "text", None) or ""
-                    #                         finished = getattr(inp, "finished", False)
-                    #                         if text:
-                    #                             answer_state["transcript"] = (
-                    #                                 (answer_state["transcript"] or "") + text
-                    #                             ).strip()
-                    #                         if finished and answer_state["transcript"]:
-                    #                             idx = answer_state["current_index"]
-                    #                             if idx < len(response_field_order):
-                    #                                 logger.info(
-                    #                                     "Saving response (finished=True): assessment_id=%s index=%s field=%s",
-                    #                                     assessment_id, idx, response_field_order[idx],
-                    #                                 )
-                    #                                 _save_response_for_question(
-                    #                                     assessment_id,
-                    #                                     response_field_order,
-                    #                                     idx,
-                    #                                     answer_state["transcript"],
-                    #                                 )
-                    #                                 answer_state["current_index"] = idx + 1
-                    #                             answer_state["transcript"] = ""
-
-                    #                 model_turn = getattr(sc, "model_turn", None)
-                    #                 idx = answer_state["current_index"]
-                    #                 if (
-                    #                     assessment_id is not None
-                    #                     and response_field_order
-                    #                     and model_turn is not None
-                    #                     and answer_state["transcript"]
-                    #                     and len(answer_state["transcript"]) >= MIN_TRANSCRIPT_LEN
-                    #                 ):
-                    #                     if idx < len(response_field_order):
-                    #                         logger.info(
-                    #                             "Saving response (model_turn): assessment_id=%s index=%s field=%s len=%s",
-                    #                             assessment_id, idx, response_field_order[idx],
-                    #                             len(answer_state["transcript"]),
-                    #                         )
-                    #                         _save_response_for_question(
-                    #                             assessment_id,
-                    #                             response_field_order,
-                    #                             idx,
-                    #                             answer_state["transcript"],
-                    #                         )
-                    #                         answer_state["current_index"] = idx + 1
-                    #                     answer_state["transcript"] = ""
-
-                    #                 # ── Forward audio to client ─────────────────
-                    #                 parts = None
-                    #                 if model_turn and getattr(model_turn, "parts", None):
-                    #                     parts = model_turn.parts
-                    #                 if not parts and getattr(sc, "parts", None):
-                    #                     parts = sc.parts
-                    #                 if parts:
-                    #                     for part in parts:
-                    #                         inline = getattr(part, "inline_data", None)
-                    #                         if inline and getattr(inline, "data", None):
-                    #                             try:
-                    #                                 await websocket.send_bytes(inline.data)
-                    #                             except Exception as e:
-                    #                                 logger.warning("Failed to send audio to client: %s", e)
-
-                    #                 if getattr(sc, "interrupted", False):
-                    #                     try:
-                    #                         await websocket.send_json({"interrupted": True})
-                    #                     except Exception:
-                    #                         pass
-
-                    #                 # ── Interview completion check ──────────────
-                    #                 if (
-                    #                     assessment_id is not None
-                    #                     and response_field_order
-                    #                     and answer_state["current_index"] >= len(response_field_order)
-                    #                     and getattr(sc, "turn_complete", False)
-                    #                 ):
-                    #                     logger.info(
-                    #                         "Interview complete: all %s responses saved for assessment_id=%s",
-                    #                         len(response_field_order), assessment_id,
-                    #                     )
-                    #                     interview_complete.set()
-                    #                     return  # Exit receive loop cleanly
-
-                    #             except Exception as e:
-                    #                 logger.warning("Error handling Gemini message: %s", e)
-
-                    #     except asyncio.CancelledError:
-                    #         pass
-                    #     except websockets.exceptions.ConnectionClosedError as e:
-                    #         if interview_complete.is_set() or (
-                    #             assessment_id is not None
-                    #             and response_field_order
-                    #             and answer_state["current_index"] >= len(response_field_order)
-                    #         ):
-                    #             logger.info("Gemini session closed after interview completed (expected).")
-                    #             interview_complete.set()
-                    #         else:
-                    #             logger.warning(
-                    #                 "Gemini session closed mid-interview (code=%s reason=%s) — will reconnect.",
-                    #                 e.code, e.reason,
-                    #             )
-                    #     except Exception as e:
-                    #         logger.exception("Error receiving from Gemini: %s", e)
+                
 
                     async def receive_from_gemini():
                         nonlocal _logged_sc_keys
@@ -991,6 +556,7 @@ async def agent_websocket(websocket: WebSocket):
                                         go_away = getattr(message, "go_away", None)
                                         if go_away is not None:
                                             logger.warning("Gemini sent go_away signal: %s", go_away)
+                                            session_rotation_requested = True
 
                                         if not hasattr(message, "server_content") or message.server_content is None:
                                             if not _logged_sc_keys:
@@ -998,6 +564,9 @@ async def agent_websocket(websocket: WebSocket):
                                             continue
 
                                         sc = message.server_content
+                                        model_turn = getattr(sc, "model_turn", None)
+                                        turn_complete = getattr(sc, "turn_complete", False)
+                                        out = getattr(sc, "output_transcription", None)
 
                                         if assessment_id is not None and not _logged_sc_keys:
                                             try:
@@ -1007,60 +576,106 @@ async def agent_websocket(websocket: WebSocket):
                                                 pass
                                             _logged_sc_keys = True
 
+                                        if out is not None:
+                                            out_text = (getattr(out, "text", None) or "").strip()
+                                            if out_text:
+                                                answer_state["output_transcript"] = (
+                                                    f'{answer_state["output_transcript"]} {out_text}'.strip()
+                                                )
+
                                         # ── Transcription → save answer ─────────────────────────────
                                         if assessment_id is not None and response_field_order:
                                             inp = getattr(sc, "input_transcription", None)
                                             if inp is not None:
                                                 text = getattr(inp, "text", None) or ""
                                                 finished = getattr(inp, "finished", False)
-                                                if text:
+                                                if answer_state["discard_intro_reply"]:
+                                                    if finished:
+                                                        logger.info(
+                                                            "Discarded warm-up reply for assessment_id=%s before Question 1 capture.",
+                                                            assessment_id,
+                                                        )
+                                                        answer_state["transcript"] = ""
+                                                        answer_state["user_turn_finished"] = False
+                                                elif text and answer_state["question_open"]:
                                                     answer_state["transcript"] = (
                                                         (answer_state["transcript"] or "") + text
                                                     ).strip()
-                                                if finished and answer_state["transcript"]:
-                                                    idx = answer_state["current_index"]
-                                                    if idx < len(response_field_order):
-                                                        logger.info(
-                                                            "Saving response (finished=True): assessment_id=%s index=%s field=%s",
-                                                            assessment_id, idx, response_field_order[idx],
-                                                        )
-                                                        _save_response_for_question(
-                                                            assessment_id,
-                                                            response_field_order,
-                                                            idx,
-                                                            answer_state["transcript"],
-                                                        )
-                                                        answer_state["current_index"] = idx + 1
+                                                if finished and answer_state["question_open"]:
+                                                    answer_state["user_turn_finished"] = True
+                                                    answer_state["question_open"] = False
+
+                                        # ── Question progression based on agent output transcription ──
+                                        if assessment_id is not None and response_field_order and turn_complete:
+                                            output_text = (answer_state["output_transcript"] or "").strip()
+                                            marker_kind, marker_number = _extract_question_marker(output_text)
+                                            current_question_number = answer_state["current_index"] + 1
+
+                                            if answer_state["discard_intro_reply"]:
+                                                if marker_kind == "question" and marker_number == current_question_number:
+                                                    logger.info(
+                                                        "Detected Question %s start for assessment_id=%s after warm-up.",
+                                                        marker_number,
+                                                        assessment_id,
+                                                    )
+                                                    answer_state["discard_intro_reply"] = False
+                                                    answer_state["question_open"] = True
+                                                    answer_state["user_turn_finished"] = False
                                                     answer_state["transcript"] = ""
+                                            else:
+                                                if marker_kind == "followup" and marker_number == current_question_number:
+                                                    logger.info(
+                                                        "Detected follow-up on Question %s for assessment_id=%s; appending to same response.",
+                                                        marker_number,
+                                                        assessment_id,
+                                                    )
+                                                    answer_state["question_open"] = True
+                                                    answer_state["user_turn_finished"] = False
+                                                elif marker_kind == "question" and marker_number == current_question_number:
+                                                    logger.info(
+                                                        "Detected Question %s prompt for assessment_id=%s; opening capture.",
+                                                        marker_number,
+                                                        assessment_id,
+                                                    )
+                                                    answer_state["question_open"] = True
+                                                    answer_state["user_turn_finished"] = False
+                                                elif (
+                                                    marker_kind == "question"
+                                                    and marker_number == current_question_number + 1
+                                                ):
+                                                    if answer_state["transcript"]:
+                                                        _finalize_current_answer(
+                                                            "question_transition",
+                                                            min_length=MIN_TRANSCRIPT_LEN,
+                                                        )
+                                                    logger.info(
+                                                        "Detected transition to Question %s for assessment_id=%s.",
+                                                        marker_number,
+                                                        assessment_id,
+                                                    )
+                                                    answer_state["question_open"] = True
+                                                    answer_state["user_turn_finished"] = False
+                                                elif (
+                                                    answer_state["user_turn_finished"]
+                                                    and answer_state["current_index"] == len(response_field_order) - 1
+                                                    and answer_state["transcript"]
+                                                ):
+                                                    _finalize_current_answer(
+                                                        "final_question_complete",
+                                                        min_length=MIN_TRANSCRIPT_LEN,
+                                                    )
+                                                    answer_state["question_open"] = False
+                                                elif answer_state["user_turn_finished"] and answer_state["transcript"]:
+                                                    logger.warning(
+                                                        "Could not determine next question marker after Question %s for assessment_id=%s. "
+                                                        "Keeping current question open for follow-up.",
+                                                        current_question_number,
+                                                        assessment_id,
+                                                    )
+                                                    answer_state["question_open"] = True
+                                                    answer_state["user_turn_finished"] = False
 
-                                        # ── model_turn save (fallback for when finished=True never fires) ──
-                                        # IMPORTANT: Only save here if we have NOT already saved via
-                                        # the finished=True path (i.e. transcript is still non-empty).
-                                        model_turn = getattr(sc, "model_turn", None)
-                                        turn_complete = getattr(sc, "turn_complete", False)
-
-                                        if (
-                                            assessment_id is not None
-                                            and response_field_order
-                                            and turn_complete
-                                            and answer_state["transcript"]
-                                            and len(answer_state["transcript"]) >= MIN_TRANSCRIPT_LEN
-                                        ):
-                                            idx = answer_state["current_index"]
-                                            if idx < len(response_field_order):
-                                                logger.info(
-                                                    "Saving response (turn_complete): assessment_id=%s index=%s field=%s len=%s",
-                                                    assessment_id, idx, response_field_order[idx],
-                                                    len(answer_state["transcript"]),
-                                                )
-                                                _save_response_for_question(
-                                                    assessment_id,
-                                                    response_field_order,
-                                                    idx,
-                                                    answer_state["transcript"],
-                                                )
-                                                answer_state["current_index"] = idx + 1
-                                            answer_state["transcript"] = ""
+                                            answer_state["output_transcript"] = ""
 
                                         # ── Forward audio to client ─────────────────────────────────
                                         parts = None
@@ -1103,6 +718,13 @@ async def agent_websocket(websocket: WebSocket):
                                                 await websocket.send_json({"answers_saved": True})
                                             except Exception:
                                                 pass
+
+                                        if session_rotation_requested and turn_complete:
+                                            logger.info(
+                                                "Rotating Gemini session after completed turn at question index %s.",
+                                                answer_state["current_index"],
+                                            )
+                                            return
 
                                     except Exception as e:
                                         logger.warning("Error handling Gemini message: %s", e)
