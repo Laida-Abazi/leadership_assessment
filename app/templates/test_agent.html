@@ -131,6 +131,7 @@
       const OUTPUT_SAMPLE_RATE = 24000;
       const CHUNK_MS = 80;
       const INPUT_CHUNK_SAMPLES = Math.floor((INPUT_SAMPLE_RATE * CHUNK_MS) / 1000);
+      const MAX_RECONNECT_ATTEMPTS = 20;
       let ws = null;
       let stream = null;
       let audioContext = null;
@@ -140,6 +141,8 @@
       let nextPlayTime = 0;
       let interviewComplete = false;
       let userDisconnected = false;
+      let reconnectAttempts = 0;
+      let reconnectTimer = null;
 
       function setStatus(cls, text) {
         statusEl.className = "status " + cls;
@@ -201,6 +204,9 @@
       `;
 
       async function startCapture() {
+        if (stream && captureWorkletNode && audioContext) {
+          return;
+        }
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         const sampleRate = 48000;
         audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate });
@@ -234,11 +240,37 @@
         playbackContext = null;
       }
 
-      function connect() {
+      function clearReconnectTimer() {
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+      }
+
+      function scheduleReconnect() {
+        if (userDisconnected || interviewComplete || assessmentId == null) return;
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+          setStatus("error", "Connection ended unexpectedly. Click Start Assessment to reconnect.");
+          setConnected(false);
+          stopCapture();
+          return;
+        }
+        reconnectAttempts += 1;
+        const delay = Math.min(1000 * reconnectAttempts, 5000);
+        setStatus("connecting", "Reconnecting interview...");
+        clearReconnectTimer();
+        reconnectTimer = setTimeout(function () {
+          connect({ isReconnect: true });
+        }, delay);
+      }
+
+      function connect(options) {
+        const isReconnect = !!(options && options.isReconnect);
         const protocol = location.protocol === "https:" ? "wss:" : "ws:";
         let url = protocol + "//" + location.host + "/agent/ws";
         if (assessmentId != null) url += "?assessment_id=" + assessmentId;
-        setStatus("connecting", "Connecting…");
+        clearReconnectTimer();
+        setStatus("connecting", isReconnect ? "Reconnecting interview..." : "Connecting…");
         ws = new WebSocket(url);
         ws.binaryType = "arraybuffer";
 
@@ -251,10 +283,17 @@
               if (msg.ping) {
                 return;
               } else if (msg.status === "connected") {
+                reconnectAttempts = 0;
+                setStatus("connected", "Connected. Speak now.");
+                setConnected(true);
+                startCapture();
+              } else if (msg.status === "reconnected") {
+                reconnectAttempts = 0;
                 setStatus("connected", "Connected. Speak now.");
                 setConnected(true);
                 startCapture();
               } else if (msg.answers_saved) {
+                interviewComplete = true;
                 setStatus("connected", "All answers saved. Click \"Finish Assessment\" when ready.");
                 return;
               } else if (msg.gemini_disconnected) {
@@ -274,30 +313,32 @@
         };
 
         ws.onerror = function () {
-          setStatus("error", "Connection error");
-          setConnected(false);
+          if (!userDisconnected && !interviewComplete && assessmentId != null) {
+            setStatus("connecting", "Reconnecting interview...");
+          } else {
+            setStatus("error", "Connection error");
+            setConnected(false);
+          }
         };
 
         ws.onclose = function () {
           ws = null;
-          stopCapture();
           if (interviewComplete || userDisconnected) {
+            stopCapture();
             if (!interviewComplete) setStatus("idle", "Disconnected");
             setConnected(false);
             userDisconnected = false;
             return;
           }
-          if (statusEl.className.indexOf("connected") !== -1) {
-            setStatus("error", "Connection ended unexpectedly. Click Start Assessment to reconnect.");
-          } else {
-            setStatus("idle", "Click Start Assessment to begin");
-          }
-          setConnected(false);
+          scheduleReconnect();
         };
       }
 
       function disconnect() {
         userDisconnected = true;
+        interviewComplete = false;
+        reconnectAttempts = 0;
+        clearReconnectTimer();
         if (ws) {
           ws.close();
           ws = null;
