@@ -639,9 +639,9 @@ async def agent_websocket(websocket: WebSocket):
                                             current_question_number = current_question_idx + 1
 
                                             if answer_state["discard_intro_reply"]:
-                                                if detected_question_idx == current_question_idx:
+                                                if detected_question_idx == current_question_idx or output_text:
                                                     logger.info(
-                                                        "Detected first assessment question for assessment_id=%s after warm-up.",
+                                                        "Opening first assessment question capture for assessment_id=%s after warm-up.",
                                                         assessment_id,
                                                     )
                                                     answer_state["discard_intro_reply"] = False
