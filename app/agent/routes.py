@@ -128,7 +128,6 @@ def _build_interview_system_instruction(
     questions: list[str],
     resumed: bool = False,
     candidate_name: str | None = None,
-    start_number: int = 1,
 ) -> str:
     """Build system instruction for conducting the assessment interview."""
     if not questions:
@@ -161,10 +160,11 @@ def _build_interview_system_instruction(
                 "after that, start the formal assessment with Question 1 in a new turn."
             )
     lines += [
-        "- Start every formal assessment question with the exact spoken prefix 'Question N:' where N is the question number below.",
-        "- If you need clarification for the same question, start with the exact spoken prefix 'Follow-up on Question N:'.",
-        "- Only move to the next numbered question after you are satisfied the current numbered question has been answered.",
-        "- Ask exactly the question text below for each step; you may rephrase slightly for natural speech only if needed.",
+        "- Ask the formal assessment questions in the order below, but do not announce them with labels like 'Question one', 'Question two', or similar numbering.",
+        "- Keep the delivery warm and conversational, using natural transitions instead of sounding like a checklist.",
+        "- Ask the core question text below clearly enough that it remains recognizable, but you may add a short friendly lead-in if it helps the flow.",
+        "- If you need clarification for the same question, ask a natural follow-up without signaling that you are moving to a new question.",
+        "- Only move to the next question after you are satisfied the current question has been answered.",
         "- After the candidate answers, acknowledge warmly and briefly, then ask the next question smoothly.",
         "- Sprinkle in light reassurance as needed (e.g., 'No right or wrong answers here—just your thoughts').",
         "- Do not skip questions or jump ahead. Do not repeat a question once they have answered.",
@@ -173,9 +173,34 @@ def _build_interview_system_instruction(
         "",
         "Questions to ask (in this order):",
     ]
-    for i, q in enumerate(questions, start_number):
+    for i, q in enumerate(questions, 1):
         lines.append(f"{i}. {q}")
     return "\n".join(lines)
+
+
+def _normalize_question_text(text: str) -> str:
+    """Normalize text for loose question matching."""
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", (text or "").lower())).strip()
+
+
+def _detect_question_from_output(output_text: str, questions: list[str], current_index: int) -> int | None:
+    """Best-effort detection of which canonical question Gemini just asked."""
+    normalized_output = _normalize_question_text(output_text)
+    if not normalized_output:
+        return None
+
+    search_order = list(range(max(current_index - 1, 0), min(current_index + 2, len(questions))))
+    for idx in range(len(questions)):
+        if idx not in search_order:
+            search_order.append(idx)
+
+    for idx in search_order:
+        normalized_question = _normalize_question_text(questions[idx])
+        if not normalized_question:
+            continue
+        if normalized_question in normalized_output:
+            return idx
+    return None
 
 
 @router.get("/test", response_class=FileResponse)
@@ -230,7 +255,6 @@ async def agent_websocket(websocket: WebSocket):
                         remaining_questions,
                         resumed=resumed,
                         candidate_name=candidate_name,
-                        start_number=already_saved + 1,
                     )
                 else:
                     logger.info("All %d questions already answered for assessment_id=%s", len(questions), assessment_id)
@@ -312,7 +336,6 @@ async def agent_websocket(websocket: WebSocket):
                     remaining,
                     resumed=resumed,
                     candidate_name=candidate_name,
-                    start_number=saved + 1,
                 )
             else:
                 cfg["system_instruction"] = system_instruction
@@ -354,18 +377,6 @@ async def agent_websocket(websocket: WebSocket):
             answer_state["user_turn_finished"] = False
         return saved
 
-    def _extract_question_marker(text: str) -> tuple[str | None, int | None]:
-        """Parse machine-readable spoken markers like 'Question 2:' or 'Follow-up on Question 2:'."""
-        if not text:
-            return None, None
-        match = re.search(r"\bfollow[- ]up on question\s+(\d+)\b", text, flags=re.IGNORECASE)
-        if match:
-            return "followup", int(match.group(1))
-        match = re.search(r"\bquestion\s+(\d+)\b", text, flags=re.IGNORECASE)
-        if match:
-            return "question", int(match.group(1))
-        return None, None
-
     # ── Task: read client WebSocket → audio_queue ───────────────────────────────
     async def read_client_audio():
         """Pump raw PCM bytes from the client WebSocket into audio_queue."""
@@ -382,6 +393,12 @@ async def agent_websocket(websocket: WebSocket):
                         logger.warning("Client WebSocket disconnected unexpectedly (code=%s).", code)
                     break
                 except Exception as e:
+                    # In some production ASGI environments, once a disconnect frame
+                    # has been consumed, later receive() calls raise this runtime
+                    # error instead of WebSocketDisconnect. Treat it as terminal.
+                    if 'disconnect message has been received' in str(e).lower():
+                        logger.info("Client receive loop reached terminal disconnect state: %s", e)
+                        break
                     consecutive_errors += 1
                     logger.warning("Transient receive error #%s: %s", consecutive_errors, e)
                     if consecutive_errors >= 5:
@@ -535,7 +552,7 @@ async def agent_websocket(websocket: WebSocket):
                 
 
                     async def receive_from_gemini():
-                        nonlocal _logged_sc_keys
+                        nonlocal _logged_sc_keys, session_rotation_requested
                         try:
                             while not client_disconnected.is_set():
                                 turn_had_messages = False
@@ -608,14 +625,18 @@ async def agent_websocket(websocket: WebSocket):
                                         # ── Question progression based on agent output transcription ──
                                         if assessment_id is not None and response_field_order and turn_complete:
                                             output_text = (answer_state["output_transcript"] or "").strip()
-                                            marker_kind, marker_number = _extract_question_marker(output_text)
-                                            current_question_number = answer_state["current_index"] + 1
+                                            detected_question_idx = _detect_question_from_output(
+                                                output_text,
+                                                questions,
+                                                answer_state["current_index"],
+                                            )
+                                            current_question_idx = answer_state["current_index"]
+                                            current_question_number = current_question_idx + 1
 
                                             if answer_state["discard_intro_reply"]:
-                                                if marker_kind == "question" and marker_number == current_question_number:
+                                                if detected_question_idx == current_question_idx:
                                                     logger.info(
-                                                        "Detected Question %s start for assessment_id=%s after warm-up.",
-                                                        marker_number,
+                                                        "Detected first assessment question for assessment_id=%s after warm-up.",
                                                         assessment_id,
                                                     )
                                                     answer_state["discard_intro_reply"] = False
@@ -623,34 +644,17 @@ async def agent_websocket(websocket: WebSocket):
                                                     answer_state["user_turn_finished"] = False
                                                     answer_state["transcript"] = ""
                                             else:
-                                                if marker_kind == "followup" and marker_number == current_question_number:
-                                                    logger.info(
-                                                        "Detected follow-up on Question %s for assessment_id=%s; appending to same response.",
-                                                        marker_number,
-                                                        assessment_id,
-                                                    )
+                                                if detected_question_idx == current_question_idx:
                                                     answer_state["question_open"] = True
                                                     answer_state["user_turn_finished"] = False
-                                                elif marker_kind == "question" and marker_number == current_question_number:
-                                                    logger.info(
-                                                        "Detected Question %s prompt for assessment_id=%s; opening capture.",
-                                                        marker_number,
-                                                        assessment_id,
-                                                    )
-                                                    answer_state["question_open"] = True
-                                                    answer_state["user_turn_finished"] = False
-                                                elif (
-                                                    marker_kind == "question"
-                                                    and marker_number == current_question_number + 1
-                                                ):
+                                                elif detected_question_idx == current_question_idx + 1:
                                                     if answer_state["transcript"]:
                                                         _finalize_current_answer(
                                                             "question_transition",
                                                             min_length=MIN_TRANSCRIPT_LEN,
                                                         )
                                                     logger.info(
-                                                        "Detected transition to Question %s for assessment_id=%s.",
-                                                        marker_number,
+                                                        "Detected transition to next assessment question for assessment_id=%s.",
                                                         assessment_id,
                                                     )
                                                     answer_state["question_open"] = True
@@ -667,9 +671,9 @@ async def agent_websocket(websocket: WebSocket):
                                                     answer_state["question_open"] = False
                                                 elif answer_state["user_turn_finished"] and answer_state["transcript"]:
                                                     logger.warning(
-                                                        "Could not determine next question marker after Question %s for assessment_id=%s. "
+                                                        "Could not determine next question boundary after question index %s for assessment_id=%s. "
                                                         "Keeping current question open for follow-up.",
-                                                        current_question_number,
+                                                        current_question_idx,
                                                         assessment_id,
                                                     )
                                                     answer_state["question_open"] = True
