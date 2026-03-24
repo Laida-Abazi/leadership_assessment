@@ -345,8 +345,8 @@ async def agent_websocket(websocket: WebSocket):
             cfg["system_instruction"] = system_instruction
         return cfg
 
-    def _finalize_current_answer(reason: str, min_length: int = 0) -> bool:
-        """Persist the current answer once and block late transcript spillover."""
+    def _save_current_answer_snapshot(reason: str, min_length: int = 0) -> bool:
+        """Persist the current cumulative answer for the current question without advancing."""
         transcript = (answer_state["transcript"] or "").strip()
         idx = answer_state["current_index"]
         if not transcript:
@@ -365,17 +365,18 @@ async def agent_websocket(websocket: WebSocket):
             response_field_order[idx],
             len(transcript),
         )
-        saved = _save_response_for_question(
+        return _save_response_for_question(
             assessment_id,
             response_field_order,
             idx,
             transcript,
         )
-        if saved:
-            answer_state["current_index"] = idx + 1
-            answer_state["transcript"] = ""
-            answer_state["user_turn_finished"] = False
-        return saved
+
+    def _advance_to_next_question() -> None:
+        """Move question tracking forward after the current answer is safely persisted."""
+        answer_state["current_index"] += 1
+        answer_state["transcript"] = ""
+        answer_state["user_turn_finished"] = False
 
     # ── Task: read client WebSocket → audio_queue ───────────────────────────────
     async def read_client_audio():
@@ -621,6 +622,10 @@ async def agent_websocket(websocket: WebSocket):
                                                 if finished and answer_state["question_open"]:
                                                     answer_state["user_turn_finished"] = True
                                                     answer_state["question_open"] = False
+                                                    _save_current_answer_snapshot(
+                                                        "turn_finished",
+                                                        min_length=MIN_TRANSCRIPT_LEN,
+                                                    )
 
                                         # ── Question progression based on agent output transcription ──
                                         if assessment_id is not None and response_field_order and turn_complete:
@@ -649,10 +654,11 @@ async def agent_websocket(websocket: WebSocket):
                                                     answer_state["user_turn_finished"] = False
                                                 elif detected_question_idx == current_question_idx + 1:
                                                     if answer_state["transcript"]:
-                                                        _finalize_current_answer(
+                                                        _save_current_answer_snapshot(
                                                             "question_transition",
                                                             min_length=MIN_TRANSCRIPT_LEN,
                                                         )
+                                                    _advance_to_next_question()
                                                     logger.info(
                                                         "Detected transition to next assessment question for assessment_id=%s.",
                                                         assessment_id,
@@ -664,10 +670,11 @@ async def agent_websocket(websocket: WebSocket):
                                                     and answer_state["current_index"] == len(response_field_order) - 1
                                                     and answer_state["transcript"]
                                                 ):
-                                                    _finalize_current_answer(
+                                                    _save_current_answer_snapshot(
                                                         "final_question_complete",
                                                         min_length=MIN_TRANSCRIPT_LEN,
                                                     )
+                                                    _advance_to_next_question()
                                                     answer_state["question_open"] = False
                                                 elif answer_state["user_turn_finished"] and answer_state["transcript"]:
                                                     logger.warning(
