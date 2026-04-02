@@ -1,4 +1,5 @@
 import json
+import re
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -25,25 +26,42 @@ ASSESSMENT_QUESTION_FIELDS = [
     "integrity_ethics_question",
 ]
 
-ASSESSMENT_GENERATION_PROMPT = """You are an expert in leadership and hiring assessments. Given the following job requirements, generate exactly 10 assessment questions—one for each type below. Each question must be tailored to this specific role and its requirements. 
+ASSESSMENT_GENERATION_PROMPT = """You are an expert in leadership and hiring assessments. Given the following job requirements, generate exactly 10 assessment questions (one for each required key).
 
-    Make every question sound natural and conversational, like something a friendly interviewer would say in a real chat. 
-    Keep them clear, professional, and engaging for a formal assessment—avoid any "e.g.", lists like A/B/1/2, or catalog-style phrasing.
-    Just craft smooth, human-sounding questions ready to read aloud.
+Goal: produce role-specific, evidence-seeking interview questions that directly test this specific job's requirements, not generic interview prompts.
 
-    Return ONLY a valid JSON object with exactly these keys (use the key names as given); no other text.
+STRICT TAILORING RULES:
+1) Requirement coverage:
+   - Use ALL requirement categories present in the input: technical skills/frameworks/tools, responsibilities, domain/industry context, seniority, soft skills, culture fit, communication/language, constraints (location/availability/work authorization), education/certification, and relevant experience.
+   - Distribute coverage across the 10 questions so no major requirement category is ignored.
+2) Concrete specificity:
+   - If a requirement names a specific framework/tool/platform/methodology (for example React, FastAPI, AWS, Docker, Scrum), mention that exact term in at least one question, preferably multiple when relevant.
+   - If a responsibility is explicit (for example stakeholder management, architecture decisions, incident response), ask for concrete examples tied to that responsibility.
+3) Evidence and depth:
+   - Questions must force candidates to provide verifiable evidence: specific project context, decisions, trade-offs, metrics/results, and lessons learned.
+   - Avoid broad prompts that can be answered vaguely.
+   - Each question must have ONE primary objective only. Do not bundle several different competencies into one question.
+   - Avoid long chained prompts like "how did you do X, Y, Z, and what was the result". Keep each question focused enough to be asked and answered in one turn.
+4) Tone and format:
+   - Natural, conversational, professional, and ready to read aloud.
+   - No bullet points, no A/B lists, no "e.g.".
+   - One question per value, each ending with a question mark.
+   - Keep each question concise enough for voice delivery, ideally 1-2 sentences.
+
+Return ONLY a valid JSON object with exactly these keys (use the key names as given); no other text.
 
 Keys and meaning:
-- behavioral_question: Focus on their past behavior and how they handled real situations, like "Tell me about a time when you faced a tough team challenge.
-- competency_based_question: Probe specific competencies they've demonstrated, like "Walk me through how you've led a project from start to finish.
-- situational_question: Present a hypothetical scenario, like "Imagine your team misses a key deadline—what would you do next?
-- panel_question: Design for a group of interviewers, like "Our panel would love to hear your thoughts on balancing short-term wins with long-term goals.
-- business_case_question: Test analysis and decision-making, like "Here's a business challenge we're facing—how would you approach solving it?
-- live_simulation_question: Set up a real-time scenario or role-play, like "Pretend I'm a frustrated stakeholder—convince me to approve your budget.
-- psychometric_question: Explore traits, preferences, or fit, like "How do you prefer to handle conflict in a high-pressure environment?
-- structured_reference_question: uide checking references, like "Who would you suggest we speak with about your leadership in past roles, and what should we ask them?
-- culture_alignment_question: Assess values and team fit, like "What draws you to our company's collaborative culture?
-- integrity_ethics_question: Gauge ethical judgment, like "Describe a time when you had to make a tough call between business needs and doing what's right.
+- behavioral_question: Past behavior in a real role-relevant situation, anchored to one or more stated requirements.
+- competency_based_question: Demonstrated competency for this job, tied to required skills/responsibilities.
+- situational_question: Hypothetical but realistic scenario from this role's environment and constraints.
+- panel_question: A question suitable for multiple interviewers to assess cross-functional judgment and communication.
+- business_case_question: Analysis and decision-making on a role-specific business/technical problem.
+- live_simulation_question: Real-time role-play based on an authentic requirement from the job.
+- psychometric_question: Work style or traits relevant to this role's pressure points and team context.
+- structured_reference_question: Reference-check-oriented question targeting the most critical job requirements.
+- culture_alignment_question: Values/team-fit question grounded in the stated culture and collaboration expectations.
+- integrity_ethics_question: Ethical judgment question based on realistic dilemmas in this role/domain.
+
 Job requirements to tailor questions to:
 ---
 {job_summary}
@@ -104,6 +122,8 @@ def generate_assessment_questions(job: JobRequirements) -> dict[str, str]:
         if content.startswith("json"):
             content = content[4:]
         content = content.strip()
+    # Strip trailing commas before } or ] that LLMs occasionally produce.
+    content = re.sub(r",\s*([}\]])", r"\1", content)
     try:
         data = json.loads(content)
     except json.JSONDecodeError as e:

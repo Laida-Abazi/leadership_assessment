@@ -1,4 +1,5 @@
 from sqlalchemy import Column, Integer, ForeignKey, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from app.db.index import Base
 
@@ -10,7 +11,15 @@ class Analysis(Base):
     job_requirements_id = Column(Integer, ForeignKey("job_requirements.id"), nullable=False)
     assessment_id = Column(Integer, ForeignKey("assessments.id"), nullable=False)
     responses_id = Column(Integer, ForeignKey("responses.id"), nullable=False)
+    # Legacy text blob — kept for backward compatibility; new narrative summary also written here.
     analysis = Column(Text, nullable=False)
+
+    # Intelligence pipeline JSONB columns (added via migration).
+    aggregated_traits   = Column(JSONB, nullable=True)
+    consistency_scores  = Column(JSONB, nullable=True)
+    trait_gaps          = Column(JSONB, nullable=True)
+    contradictions      = Column(JSONB, nullable=True)
+    behavioral_patterns = Column(JSONB, nullable=True)
 
     job_requirements = relationship("JobRequirements", back_populates="analyses")
     assessment = relationship("Assessments", back_populates="analyses")

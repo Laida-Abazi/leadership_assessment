@@ -24,3 +24,5 @@ class Assessments(Base):
     job_requirements = relationship("JobRequirements", back_populates="assessments")
     responses = relationship("Responses", back_populates="assessment", uselist=False)
     analyses = relationship("Analysis", back_populates="assessment")
+    response_segments = relationship("ResponseSegment", back_populates="assessment", cascade="all, delete-orphan")
+    response_signals  = relationship("ResponseSignal", back_populates="assessment", cascade="all, delete-orphan")

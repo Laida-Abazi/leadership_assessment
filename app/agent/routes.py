@@ -3,6 +3,7 @@ Voice agent routes: Gemini Live (STS) WebSocket proxy for friendly conversation
 and structured assessment interviews.
 """
 import asyncio
+import json
 import logging
 import os
 import re
@@ -15,8 +16,9 @@ import websockets.exceptions
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
+from app.as_requirements.config.models_setup import MODEL_MINI, get_openai_client
 from app.db import SessionLocal
-from app.db.models import Assessments, Responses, User
+from app.db.models import Assessments, ResponseSegment, Responses, User
 
 logger = logging.getLogger(__name__)
 
@@ -157,10 +159,26 @@ def _count_saved_responses(assessment_id: int, response_fields: list[str]) -> in
         row = db.query(Responses).filter(Responses.assessment_id == assessment_id).first()
         if not row:
             return 0
+        finalized_types = {
+            response_type
+            for (response_type,) in (
+                db.query(ResponseSegment.response_type)
+                .filter(ResponseSegment.assessment_id == assessment_id)
+                .distinct()
+                .all()
+            )
+        }
         count = 0
         for field in response_fields:
             val = getattr(row, field, None)
-            if val and isinstance(val, str) and val.strip():
+            response_type = field.replace("_response", "")
+            is_saved = bool(val and isinstance(val, str) and val.strip())
+            if finalized_types:
+                if is_saved and response_type in finalized_types:
+                    count += 1
+                    continue
+                break
+            if is_saved:
                 count += 1
             else:
                 break
@@ -213,6 +231,7 @@ def _build_interview_system_instruction(
         "- Do NOT label questions with numbers ('Question one', 'Question 1', etc.).",
         "- Use short, warm transitions between questions (e.g. 'Great, thanks for sharing that. Moving on…').",
         "- Ask each question clearly. A brief friendly lead-in is fine.",
+        "- Ask the stored question as ONE question turn. Do not decompose it into multiple mini-questions unless the candidate asks for clarification.",
         "- If you need elaboration on the SAME question, ask a natural follow-up — do NOT move to the next question until satisfied.",
         "- After an answer, acknowledge warmly and briefly, THEN ask the next question.",
         "- Do not skip questions or change their order.",
@@ -227,6 +246,40 @@ def _build_interview_system_instruction(
         lines.append(f"{i}. {q}")
 
     return "\n".join(lines)
+
+
+def _split_question_into_sub_prompts(question: str) -> list[str]:
+    """
+    Split a long multi-part interview question into shorter sequential prompts.
+
+    Heuristic:
+    - Split on semicolons.
+    - Split on comma boundaries before interrogatives (what/how/why/etc.).
+    """
+    text = re.sub(r"\s+", " ", (question or "").strip())
+    if not text:
+        return []
+
+    parts = [p.strip(" ,") for p in re.split(r";\s*", text) if p and p.strip(" ,")]
+    clauses: list[str] = []
+    for part in parts:
+        segmented = re.sub(
+            r",\s*(?=(?:what|which|how|why|when|where|who)\b)",
+            "||",
+            part,
+            flags=re.IGNORECASE,
+        )
+        for piece in segmented.split("||"):
+            clean = piece.strip(" ,")
+            if not clean:
+                continue
+            if not clean.endswith("?"):
+                clean = clean.rstrip(".!,:;") + "?"
+            clauses.append(clean)
+
+    if len(clauses) <= 1:
+        return [text if text.endswith("?") else text.rstrip(".!,:;") + "?"]
+    return clauses
 
 
 def _normalize_question_text(text: str) -> str:
@@ -251,6 +304,79 @@ def _detect_question_from_output(output_text: str, questions: list[str], current
             continue
         if normalized_question in normalized_output:
             return idx
+    return None
+
+
+async def _detect_question_from_output_semantic(
+    output_text: str,
+    questions: list[str],
+    current_index: int,
+) -> int | None:
+    """
+    Use a lightweight LLM check to map the agent's spoken turn to the most likely
+    stored question index when exact text matching fails.
+    """
+    text = (output_text or "").strip()
+    if not text or not questions:
+        return None
+
+    fallback = _detect_question_from_output(text, questions, current_index)
+    if fallback is not None:
+        return fallback
+
+    numbered_questions = "\n".join(
+        f"{idx + 1}. {question}" for idx, question in enumerate(questions)
+    )
+    prompt = f"""You are matching an interviewer's spoken turn to a stored assessment question.
+
+Current expected question index: {current_index + 1}
+
+Stored questions:
+{numbered_questions}
+
+Interviewer spoken turn:
+\"\"\"{text}\"\"\"
+
+Return ONLY valid JSON in this shape:
+{{
+  "matched_question_index": integer or null,
+  "confidence": number from 0 to 1
+}}
+
+Rules:
+- Match by semantic meaning, not exact wording.
+- If the spoken turn is only a follow-up or clarification for the current question, return the current question index.
+- If it clearly asks the next or later stored question, return that question index.
+- If it is not possible to match confidently, return null.
+- Question indices are 1-based in the JSON output.
+"""
+    try:
+        client = get_openai_client()
+
+        def _call():
+            return client.chat.completions.create(
+                model=MODEL_MINI,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+            )
+
+        response = await asyncio.to_thread(_call)
+        raw = (response.choices[0].message.content or "").strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+        data = json.loads(raw)
+        matched = data.get("matched_question_index")
+        confidence = float(data.get("confidence") or 0)
+        if matched is None or confidence < 0.55:
+            return None
+        matched_idx = int(matched) - 1
+        if 0 <= matched_idx < len(questions):
+            return matched_idx
+    except Exception as exc:
+        logger.warning("Semantic question detection failed: %s", exc)
     return None
 
 
@@ -313,6 +439,7 @@ async def agent_websocket(websocket: WebSocket):
     questions: list[str] = []
     candidate_name: str | None = None
     already_saved = 0                 # questions answered in a previous session
+    job_requirements_id: Optional[int] = None
 
     if assessment_id is not None:
         db = SessionLocal()
@@ -333,6 +460,7 @@ async def agent_websocket(websocket: WebSocket):
                         assessment_id,
                         assessment.user_id,
                     )
+                job_requirements_id = assessment.job_requirements_id
                 questions = _assessment_questions_list(assessment)
                 response_fields = _response_fields_for_assessment(assessment)
                 logger.info(
@@ -394,15 +522,21 @@ async def agent_websocket(websocket: WebSocket):
         "current_q": already_saved,
         "transcript": "",
         "last_persisted": "",
+        "current_question_finalized": False,
         "agent_spoke": False,
         "awaiting_user_turn_end": False,
         "in_warmup": (assessment_id is not None and bool(response_fields) and already_saved == 0),
         "first_question_capture_logged": False,
         "current_question_anchor_seen": already_saved > 0,
         "output_transcript": "",
+        "agent_turn_transition_handled": False,
+        "turn_complete_seen_for_current_question": False,
         # Session-based state — True immediately on resume; set True when warm-up ends.
         "question_session_open": (already_saved > 0),
         "agent_turn_classification": "CONTINUE",
+        # Intelligence pipeline state.
+        "segment_sequence": 0,
+        "transcript_since_last_segment": "",
     }
     logger.info(
         "[%s] State init: interview_mode=%s in_warmup=%s current_q=%s/%s session_open=%s",
@@ -488,6 +622,31 @@ async def agent_websocket(websocket: WebSocket):
 
         return "CONTINUE"
 
+    async def _classify_completed_agent_turn(text: str) -> tuple[str, int | None]:
+        """
+        Classify a completed interviewer turn using heuristics first, then a
+        semantic matcher when the turn appears paraphrased.
+        """
+        classification = _classify_agent_turn(text)
+        detected_q = _detect_question_from_output(text, questions, state["current_q"])
+
+        if classification == "COMPLETE":
+            return classification, detected_q
+
+        if detected_q is None and _is_interview_mode():
+            detected_q = await _detect_question_from_output_semantic(
+                text,
+                questions,
+                state["current_q"],
+            )
+
+        if detected_q is not None:
+            if detected_q > state["current_q"]:
+                return "NEW_QUESTION", detected_q
+            return "CONTINUE", detected_q
+
+        return classification, None
+
     # ── DB helpers ────────────────────────────────────────────────────────────
 
     def _persist_current(reason: str, min_len: int = MIN_TRANSCRIPT_LEN) -> bool:
@@ -542,6 +701,9 @@ async def agent_websocket(websocket: WebSocket):
         state["current_q"] += 1
         state["transcript"] = ""
         state["last_persisted"] = ""
+        state["current_question_finalized"] = False
+        state["turn_complete_seen_for_current_question"] = False
+        state["transcript_since_last_segment"] = ""
         state["awaiting_user_turn_end"] = False
         state["current_question_anchor_seen"] = False
         logger.info(
@@ -554,19 +716,155 @@ async def agent_websocket(websocket: WebSocket):
             assessment_id,
         )
 
+    async def _write_and_extract_segment(
+        response_type: str,
+        segment_text: str,
+        sequence_order: int,
+        question_id: str | None = None,
+    ) -> None:
+        """Fire-and-forget: persist a response_segment row then extract signals."""
+        from app.services.intelligence import write_segment, extract_signals_for_segment
+        db = SessionLocal()
+        try:
+            seg = await write_segment(
+                db, assessment_id, response_type, segment_text, sequence_order, question_id=question_id
+            )
+            await extract_signals_for_segment(
+                seg.id, assessment_id, response_type, segment_text
+            )
+        except Exception as exc:
+            logger.exception("[%s] Segment write/extract failed: %s", session_id, exc)
+        finally:
+            db.close()
+
+    def _finalize_current_question(reason: str) -> bool:
+        """
+        Persist the full accumulated response for the current question exactly once.
+
+        This is the canonical write point for:
+        - `responses.*_response`
+        - one `response_segments` row per completed question
+        - one `response_signals` extraction per completed question
+        """
+        if not _is_interview_mode() or state["in_warmup"]:
+            return False
+
+        idx = state["current_q"]
+        if idx >= len(response_fields):
+            return False
+
+        text = (state["transcript"] or "").strip()
+        if not text:
+            logger.info(
+                "[%s] Finalize skipped (empty transcript). reason=%s q=%s/%s",
+                session_id,
+                reason,
+                idx + 1,
+                len(response_fields),
+            )
+            return False
+
+        if state.get("current_question_finalized") and text == (state.get("last_persisted") or "").strip():
+            logger.info(
+                "[%s] Finalize skipped (already finalized). reason=%s q=%s/%s",
+                session_id,
+                reason,
+                idx + 1,
+                len(response_fields),
+            )
+            return False
+
+        logger.info(
+            "[%s] Finalizing question: reason=%s q=%s/%s field=%s len=%s",
+            session_id,
+            reason,
+            idx + 1,
+            len(response_fields),
+            response_fields[idx],
+            len(text),
+        )
+        _persist_current(reason, min_len=0)
+
+        state["segment_sequence"] += 1
+        response_type = response_fields[idx].replace("_response", "")
+        task = asyncio.create_task(
+            _write_and_extract_segment(
+                response_type=response_type,
+                segment_text=text,
+                sequence_order=state["segment_sequence"],
+                question_id=response_fields[idx],
+            ),
+            name="segment-extract-final",
+        )
+        from app.services.intelligence import register_signal_task
+        register_signal_task(assessment_id, task)
+        state["current_question_finalized"] = True
+        state["transcript_since_last_segment"] = ""
+        return True
+
+    def _finalize_current_question_on_exit(reason: str) -> bool:
+        """
+        Best-effort recovery when the session/client ends before the interviewer
+        explicitly asks the next question.
+
+        We only finalize if the current question already accumulated meaningful
+        text and Gemini emitted at least one `turn_complete` while that text was
+        present, which is a strong signal the user had reached a natural pause.
+        """
+        text = (state.get("transcript") or "").strip()
+        if (
+            not _is_interview_mode()
+            or state["in_warmup"]
+            or state.get("current_question_finalized")
+            or len(text) < MIN_TRANSCRIPT_LEN
+            or not state.get("turn_complete_seen_for_current_question")
+        ):
+            return False
+        logger.info(
+            "[%s] Exit recovery finalization: reason=%s q=%s/%s len=%s",
+            session_id,
+            reason,
+            state["current_q"] + 1,
+            len(response_fields),
+            len(text),
+        )
+        return _finalize_current_question(reason)
+
     def _on_user_turn_finished() -> None:
         """
         Called when input_transcription.finished = True.
 
-        This no longer advances current_q.  It only saves a partial snapshot of
-        the current accumulating transcript so data is not lost on disconnect.
-        Warm-up handling is unchanged: the first finished event after the agent
-        has spoken discards the warm-up reply and opens the first question session.
+        This does not advance current_q and does not persist question-level data.
+        A response is only finalized when the agent explicitly transitions to the
+        next question or completes the interview.
         """
         if not _is_interview_mode():
             return
 
         if state["in_warmup"]:
+            warmup_text = (state["transcript"] or "").strip()
+            # Recovery path: if warm-up is still active but we already have a substantial
+            # user utterance, treat it as the start of Q1 instead of discarding it.
+            # This protects against missed anchor/finished timing during rotation/disconnect.
+            if (
+                warmup_text
+                and len(warmup_text) >= MIN_TRANSCRIPT_LEN
+                and response_fields
+                and state["current_q"] < len(response_fields)
+            ):
+                state["in_warmup"] = False
+                state["question_session_open"] = True
+                state["awaiting_user_turn_end"] = False
+                logger.warning(
+                    "[%s] Warm-up recovery activated — preserving first substantial utterance "
+                    "as q=%s/%s (len=%s).",
+                    session_id,
+                    state["current_q"] + 1,
+                    len(response_fields),
+                    len(warmup_text),
+                )
+                return
+
             logger.info(
                 "[%s] Warm-up finished — discarding. assessment_id=%s transcript_len=%s preview='%s'",
                 session_id,
@@ -577,6 +875,7 @@ async def agent_websocket(websocket: WebSocket):
             state["in_warmup"] = False
             state["transcript"] = ""
             state["last_persisted"] = ""
+            state["transcript_since_last_segment"] = ""
             state["awaiting_user_turn_end"] = False
             state["question_session_open"] = True
             if response_fields:
@@ -589,11 +888,10 @@ async def agent_websocket(websocket: WebSocket):
                 )
             return
 
-        # Partial save only — do NOT advance current_q.
         text = (state["transcript"] or "").strip()
         if text:
             logger.info(
-                "[%s] Sub-turn snapshot: assessment_id=%s q=%s/%s len=%s preview='%s'",
+                "[%s] User sub-turn finished: assessment_id=%s q=%s/%s len=%s preview='%s'",
                 session_id,
                 assessment_id,
                 state["current_q"] + 1,
@@ -601,7 +899,6 @@ async def agent_websocket(websocket: WebSocket):
                 len(text),
                 _preview_text(text),
             )
-            _persist_current("user_sub_turn_snapshot", min_len=0)
         state["awaiting_user_turn_end"] = False
 
     def _on_agent_classified_new_question() -> None:
@@ -614,32 +911,29 @@ async def agent_websocket(websocket: WebSocket):
         """
         if not _is_interview_mode() or state["in_warmup"]:
             return
-
-        text = (state["transcript"] or "").strip()
-        if text:
-            logger.info(
-                "[%s] Agent NEW_QUESTION signal — persisting q=%s/%s len=%s preview='%s'",
-                session_id,
-                state["current_q"] + 1,
-                len(response_fields),
-                len(text),
-                _preview_text(text),
-            )
-            _persist_current("agent_new_question_signal", min_len=0)
-        else:
-            logger.info(
-                "[%s] Agent NEW_QUESTION signal — empty transcript, skipping persist. q=%s/%s",
+        if state.get("agent_turn_transition_handled"):
+            logger.debug(
+                "[%s] NEW_QUESTION ignored (already handled in this agent turn). q=%s/%s",
                 session_id,
                 state["current_q"] + 1,
                 len(response_fields),
             )
+            return
+        state["agent_turn_transition_handled"] = True
 
+        _finalize_current_question("agent_new_question_signal")
         _advance_question()
         state["question_session_open"] = True
         state["output_transcript"] = ""   # reset accumulator for the new question
 
         if state["current_q"] >= len(response_fields) and not interview_complete.is_set():
             interview_complete.set()
+            if assessment_id is not None and job_requirements_id is not None:
+                from app.services.intelligence import schedule_final_analysis
+                schedule_final_analysis(
+                    assessment_id=assessment_id,
+                    job_requirements_id=job_requirements_id,
+                )
 
     def signal_client_disconnect() -> None:
         if client_disconnected.is_set():
@@ -768,17 +1062,16 @@ async def agent_websocket(websocket: WebSocket):
         except Exception as exc:
             logger.exception("[%s] Unexpected error reading client audio: %s", session_id, exc)
         finally:
-            # Best-effort: save any partial transcript the user may have spoken.
             if _is_interview_mode() and not state["in_warmup"]:
                 logger.info(
-                    "[%s] Client disconnect flush: assessment_id=%s q=%s/%s len=%s",
+                    "[%s] Client disconnect: leaving current question unfinalized. assessment_id=%s q=%s/%s len=%s",
                     session_id,
                     assessment_id,
                     state["current_q"] + 1,
                     len(response_fields),
                     len((state["transcript"] or "").strip()),
                 )
-                _persist_current("client_disconnect_flush")
+                _finalize_current_question_on_exit("client_disconnect_recovery")
             signal_client_disconnect()
             logger.info(
                 "[%s] read_client_audio finished. total_audio_frames=%s total_audio_bytes=%s",
@@ -1015,16 +1308,23 @@ async def agent_websocket(websocket: WebSocket):
                                         turn_complete: bool = bool(getattr(sc, "turn_complete", False))
                                         model_turn = getattr(sc, "model_turn", None)
                                         if turn_complete:
-                                            logger.debug(
-                                                "[%s] Gemini turn_complete=True: assessment_id=%s q=%s/%s warmup=%s awaiting_end=%s transcript_len=%s",
+                                            logger.info(
+                                                "[%s] Gemini turn_complete=True: assessment_id=%s q=%s/%s warmup=%s agent_spoke=%s session_open=%s transcript_len=%s",
                                                 session_id,
                                                 assessment_id,
                                                 state["current_q"] + 1,
                                                 len(response_fields),
                                                 state["in_warmup"],
-                                                bool(state.get("awaiting_user_turn_end")),
+                                                state["agent_spoke"],
+                                                state["question_session_open"],
                                                 len((state.get("transcript") or "").strip()),
                                             )
+                                            if (
+                                                _is_interview_mode()
+                                                and not state["in_warmup"]
+                                                and (state.get("transcript") or "").strip()
+                                            ):
+                                                state["turn_complete_seen_for_current_question"] = True
 
                                         # ── Output transcription (agent speech) ───────────
                                         out_trans = getattr(sc, "output_transcription", None)
@@ -1036,62 +1336,22 @@ async def agent_websocket(websocket: WebSocket):
                                                     f"{state.get('output_transcript', '')} {out_text}"
                                                 ).strip()
 
-                                                # Classify agent output to drive session flow.
-                                                classification = _classify_agent_turn(
-                                                    state["output_transcript"]
-                                                )
-                                                state["agent_turn_classification"] = classification
-
-                                                if classification == "NEW_QUESTION" and not state["in_warmup"]:
-                                                    _on_agent_classified_new_question()
-
-                                                elif classification == "COMPLETE" and not state["in_warmup"]:
-                                                    logger.info(
-                                                        "[%s] Agent COMPLETE signal detected. assessment_id=%s",
-                                                        session_id,
-                                                        assessment_id,
-                                                    )
-                                                    text = (state.get("transcript") or "").strip()
-                                                    if text:
-                                                        _persist_current("agent_complete_signal", min_len=0)
-                                                    if not interview_complete.is_set():
-                                                        interview_complete.set()
-
-                                                # Anchor detection — used only for warm-up exit
-                                                # and same-question confirmation.
-                                                detected_q = _detect_question_from_output(
-                                                    state["output_transcript"],
-                                                    questions,
-                                                    state["current_q"],
-                                                )
-                                                if detected_q is not None:
-                                                    if state["in_warmup"] and detected_q == 0:
-                                                        state["in_warmup"] = False
-                                                        state["transcript"] = ""
-                                                        state["last_persisted"] = ""
-                                                        state["awaiting_user_turn_end"] = False
-                                                        state["question_session_open"] = True
-                                                        logger.info(
-                                                            "[%s] Warm-up complete via anchor detection. "
-                                                            "Session open. q=1/%s field=%s",
-                                                            session_id,
-                                                            len(response_fields),
-                                                            response_fields[0] if response_fields else "n/a",
-                                                        )
-                                                    elif detected_q == state["current_q"]:
-                                                        state["current_question_anchor_seen"] = True
-                                                        logger.debug(
-                                                            "[%s] Question anchor confirmed: q=%s/%s",
-                                                            session_id,
-                                                            detected_q + 1,
-                                                            len(response_fields),
-                                                        )
-
                                         # ── Input transcription (user speech) ────────────
                                         in_trans = getattr(sc, "input_transcription", None)
                                         if in_trans is not None and _is_interview_mode():
                                             chunk_text: str = getattr(in_trans, "text", None) or ""
                                             finished: bool = bool(getattr(in_trans, "finished", False))
+
+                                            # During warm-up, still buffer text after the agent starts speaking.
+                                            # If the session rotates/disconnects before `finished=True`, we can
+                                            # recover and persist instead of losing the entire first answer.
+                                            if chunk_text and state["in_warmup"] and state["agent_spoke"]:
+                                                state["transcript"] = (
+                                                    (state["transcript"] or "") + chunk_text
+                                                ).strip()
+                                                state["transcript_since_last_segment"] = (
+                                                    (state["transcript_since_last_segment"] or "") + chunk_text
+                                                ).strip()
 
                                             # Accumulate ONLY inside an open question session.
                                             # No space injected between chunks — Gemini sends sub-word fragments
@@ -1100,6 +1360,9 @@ async def agent_websocket(websocket: WebSocket):
                                             if chunk_text and state["question_session_open"] and not state["in_warmup"]:
                                                 state["transcript"] = (
                                                     (state["transcript"] or "") + chunk_text
+                                                ).strip()
+                                                state["transcript_since_last_segment"] = (
+                                                    (state["transcript_since_last_segment"] or "") + chunk_text
                                                 ).strip()
                                                 state["awaiting_user_turn_end"] = True
                                                 if (
@@ -1154,8 +1417,79 @@ async def agent_websocket(websocket: WebSocket):
                                                         pass
 
                                         if turn_complete and _is_interview_mode():
+                                            # ── Exit warm-up once the agent finishes its first turn ─
+                                            # Gemini native-audio models may not send
+                                            # input_transcription.finished events, so
+                                            # turn_complete is the reliable fallback.
+                                            if state["in_warmup"] and state["agent_spoke"]:
+                                                warmup_text = (state.get("transcript") or "").strip()
+                                                state["in_warmup"] = False
+                                                state["question_session_open"] = True
+                                                state["awaiting_user_turn_end"] = False
+                                                if warmup_text and len(warmup_text) >= MIN_TRANSCRIPT_LEN:
+                                                    logger.info(
+                                                        "[%s] Warm-up exit via turn_complete (recovery): "
+                                                        "preserving warmup text as q=1/%s (len=%s). field=%s",
+                                                        session_id,
+                                                        len(response_fields),
+                                                        len(warmup_text),
+                                                        response_fields[0] if response_fields else "n/a",
+                                                    )
+                                                else:
+                                                    state["transcript"] = ""
+                                                    state["last_persisted"] = ""
+                                                    state["transcript_since_last_segment"] = ""
+                                                    logger.info(
+                                                        "[%s] Warm-up exit via turn_complete: discarded "
+                                                        "warmup text (len=%s). Session open. q=1/%s field=%s",
+                                                        session_id,
+                                                        len(warmup_text),
+                                                        len(response_fields),
+                                                        response_fields[0] if response_fields else "n/a",
+                                                    )
+                                            else:
+                                                completed_turn_text = (state.get("output_transcript") or "").strip()
+                                                classification, detected_q = await _classify_completed_agent_turn(
+                                                    completed_turn_text
+                                                )
+                                                state["agent_turn_classification"] = classification
+
+                                                if detected_q is not None and detected_q == state["current_q"]:
+                                                    state["current_question_anchor_seen"] = True
+
+                                                if classification == "NEW_QUESTION":
+                                                    logger.info(
+                                                        "[%s] Completed turn classified as NEW_QUESTION: current_q=%s detected_q=%s text='%s'",
+                                                        session_id,
+                                                        state["current_q"] + 1,
+                                                        (detected_q + 1) if detected_q is not None else None,
+                                                        _preview_text(completed_turn_text, limit=220),
+                                                    )
+                                                    _on_agent_classified_new_question()
+
+                                                elif (
+                                                    classification == "COMPLETE"
+                                                    and not state.get("agent_turn_transition_handled")
+                                                ):
+                                                    state["agent_turn_transition_handled"] = True
+                                                    logger.info(
+                                                        "[%s] Agent COMPLETE signal detected. assessment_id=%s",
+                                                        session_id,
+                                                        assessment_id,
+                                                    )
+                                                    _finalize_current_question("agent_complete_signal")
+                                                    if not interview_complete.is_set():
+                                                        interview_complete.set()
+                                                        if assessment_id is not None and job_requirements_id is not None:
+                                                            from app.services.intelligence import schedule_final_analysis
+                                                            schedule_final_analysis(
+                                                                assessment_id=assessment_id,
+                                                                job_requirements_id=job_requirements_id,
+                                                            )
+
                                             # Reset agent-turn output accumulator (classifier starts fresh).
                                             state["output_transcript"] = ""
+                                            state["agent_turn_transition_handled"] = False
 
                                         # ── Forward audio to client ───────────────────────
                                         parts = None
@@ -1240,17 +1574,22 @@ async def agent_websocket(websocket: WebSocket):
                         except Exception as exc:
                             logger.exception("Error receiving from Gemini: %s", exc)
                         finally:
-                            # Flush any partial transcript buffered in state.
-                            if _is_interview_mode() and not state["in_warmup"]:
+                            if _is_interview_mode():
                                 logger.info(
-                                    "[%s] Gemini session end flush: assessment_id=%s q=%s/%s len=%s",
+                                    "[%s] Gemini session end: assessment_id=%s q=%s/%s len=%s warmup=%s",
                                     session_id,
                                     assessment_id,
                                     state["current_q"] + 1,
                                     len(response_fields),
                                     len((state["transcript"] or "").strip()),
+                                    state["in_warmup"],
                                 )
-                                _persist_current("gemini_session_end_flush")
+                                if state["in_warmup"] and (state.get("transcript") or "").strip():
+                                    # If we still hold text while in warm-up, finalize warm-up handling once
+                                    # so the recovery branch can preserve substantial first answers.
+                                    _on_user_turn_finished()
+                                elif client_disconnected.is_set():
+                                    _finalize_current_question_on_exit("gemini_session_end_recovery")
 
                     # ── Run sub-tasks ─────────────────────────────────────────
                     pump_task = asyncio.create_task(pump_audio_to_gemini(), name="pump->gemini")
@@ -1321,7 +1660,6 @@ async def agent_websocket(websocket: WebSocket):
             asyncio.create_task(read_client_audio(), name="read-client"),
             asyncio.create_task(gemini_session_loop(), name="gemini-loop"),
             asyncio.create_task(keepalive_client(), name="keepalive-client"),
-            asyncio.create_task(autosave_answers(), name="autosave-answers"),
             return_exceptions=True,
         )
     except Exception as exc:

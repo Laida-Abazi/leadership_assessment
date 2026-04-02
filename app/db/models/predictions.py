@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, ForeignKey, Text
+from sqlalchemy import Column, Integer, ForeignKey, Text, Float
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from app.db.index import Base
 
@@ -9,5 +10,10 @@ class Predictions(Base):
     id = Column(Integer, primary_key=True, index=True)
     analysis_id = Column(Integer, ForeignKey("analysis.id"), nullable=False)
     prediction = Column(Text, nullable=False)
+
+    # Intelligence pipeline columns (added via migration).
+    fit_score        = Column(Float, nullable=True)
+    confidence_score = Column(Float, nullable=True)
+    risk_flags       = Column(JSONB, nullable=True)
 
     analysis = relationship("Analysis", back_populates="predictions")

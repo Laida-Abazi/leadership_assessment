@@ -26,5 +26,6 @@ class JobRequirements(Base):
     seniority_level = Column(Text, nullable=True)
     culture_fit = Column(Text, nullable=True)
 
-    assessments = relationship("Assessments", back_populates="job_requirements")
-    analyses = relationship("Analysis", back_populates="job_requirements")
+    assessments          = relationship("Assessments", back_populates="job_requirements")
+    analyses             = relationship("Analysis", back_populates="job_requirements")
+    requirement_profiles = relationship("JobRequirementProfile", back_populates="job_requirements", cascade="all, delete-orphan")

@@ -646,20 +646,58 @@
       document.getElementById("phase4Result").classList.remove("visible");
 
       try {
-        const res = await fetch("/analysis/run", {
+        // Trigger final analysis once. The backend now waits for any in-flight
+        // segment/signal extraction work rather than rebuilding everything.
+        const rerunRes = await fetch("/intelligence/assessment/" + assessmentId + "/rerun", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ assessment_id: assessmentId }),
         });
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({}));
-          throw new Error(err.detail || res.statusText);
+        if (!rerunRes.ok) {
+          const err = await rerunRes.json().catch(() => ({}));
+          throw new Error(err.detail || rerunRes.statusText);
         }
-        const data = await res.json();
 
-        const detail = (data.fits_and_gaps || "").trim();
-        const rationale = (data.rationale || "").trim();
-        document.getElementById("rationaleText").innerHTML = formatAnalysisContent(detail, rationale);
+        let pred = null;
+        for (let i = 0; i < 90; i++) {
+          const statusRes = await fetch("/intelligence/assessment/" + assessmentId + "/status");
+          if (statusRes.ok) {
+            const status = await statusRes.json();
+            if (status.pending_signal_tasks > 0) {
+              showStatus("phase4", "loading", "Extracting signals from completed question responses…");
+            } else if (status.analysis_running) {
+              showStatus("phase4", "loading", "Running final analysis…");
+            } else if (!status.analysis_ready) {
+              showStatus("phase4", "loading", "Preparing analysis…");
+            }
+            if (status.prediction_ready) {
+              const pRes = await fetch("/intelligence/assessment/" + assessmentId + "/predictions");
+              if (pRes.ok) {
+                const data = await pRes.json();
+                if (data && data.fit_score !== null && data.confidence_score !== null) {
+                  pred = data;
+                  break;
+                }
+              }
+            }
+          }
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+
+        const aRes = await fetch("/intelligence/assessment/" + assessmentId + "/analysis");
+        if (!aRes.ok) {
+          const err = await aRes.json().catch(() => ({}));
+          throw new Error(err.detail || aRes.statusText);
+        }
+        const analysisData = await aRes.json();
+        const analysisText = (analysisData.analysis_text || "").trim();
+
+        const htmlParts = [];
+        if (analysisText) {
+          htmlParts.push('<div class="analysis-body">' + escapeHtml(analysisText) + '</div>');
+        }
+        if (!htmlParts.length) {
+          htmlParts.push('<div class="analysis-body">No intelligence analysis returned yet. Try again in a moment.</div>');
+        }
+        document.getElementById("rationaleText").innerHTML = htmlParts.join("");
 
         hideStatus("phase4");
         document.getElementById("phase4Result").classList.add("visible");

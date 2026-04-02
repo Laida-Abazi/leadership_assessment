@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 import uvicorn
 
@@ -28,6 +28,7 @@ from app.as_blueprinting.routes.assessment import router as assessments_router
 from app.as_analysis.routes.analysis import router as analysis_router
 from app.auth.register import router as auth_router
 from app.agent.routes import router as agent_router
+from app.routers.intelligence import router as intelligence_router
 
 
 
@@ -47,6 +48,7 @@ app.include_router(assessments_router)
 app.include_router(analysis_router)
 app.include_router(auth_router)
 app.include_router(agent_router)
+app.include_router(intelligence_router)
 
 
 
@@ -55,11 +57,12 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/test/pipeline", response_class=FileResponse)
+@app.get("/test/pipeline")
 def serve_test_pipeline():
     """Serve the end-to-end pipeline test UI."""
     path = Path(__file__).resolve().parent / "templates" / "test_pipeline.html"
-    return FileResponse(path)
+    content = path.read_text(encoding="utf-8")
+    return HTMLResponse(content, headers={"Cache-Control": "no-store"})
 
 
 def get_app():
