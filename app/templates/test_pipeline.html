@@ -755,10 +755,40 @@
       renderStepper();
     }
 
+    function resetAssessmentWorkflowState(options) {
+      const preserveMbtiBootstrap = options && options.preserveMbtiBootstrap;
+
+      state.phase = null;
+      state.jobRequirementsId = null;
+      state.assessmentId = null;
+      if (!preserveMbtiBootstrap) {
+        state.mbtiBootstrapJobRequirementsId = null;
+      }
+
+      document.getElementById("jobDesc").value = "";
+      document.getElementById("jobReqId").value = "";
+      document.getElementById("assessmentIdPred").value = "";
+      document.getElementById("questionsBody").innerHTML = "";
+      document.getElementById("requirementsBody").innerHTML = "";
+      document.getElementById("rationaleText").innerHTML = "";
+      document.getElementById("interviewLink").href = "#";
+      document.getElementById("interviewLink").textContent = "Open Voice Interview →";
+
+      document.getElementById("phase1Result").classList.remove("visible");
+      document.getElementById("phase2Result").classList.remove("visible");
+      document.getElementById("phase4Result").classList.remove("visible");
+      document.getElementById("phase1Continue").style.display = "none";
+      document.getElementById("phase2Continue").style.display = "none";
+
+      hideStatus("phase1");
+      hideStatus("phase2");
+      hideStatus("phase4");
+    }
+
     function openAssessmentFlow(code) {
       if (!ASSESSMENT_CONFIGS[code]) return;
+      resetAssessmentWorkflowState({ preserveMbtiBootstrap: code === "mbti" });
       state.assessmentTypeCode = code;
-      state.assessmentId = null;
       const url = new URL(window.location.href);
       url.searchParams.set("assessment", code);
       window.history.pushState({}, "", url);
@@ -781,7 +811,7 @@
       }
       document.getElementById("assessmentHome").classList.remove("hidden");
       document.getElementById("pipelineApp").classList.add("hidden");
-      state.phase = null;
+      resetAssessmentWorkflowState();
       state.assessmentTypeCode = null;
       document.title = "Assessment Testing";
     }
@@ -1112,6 +1142,7 @@
       const params = new URLSearchParams(window.location.search);
       const code = params.get("assessment");
       if (code && ASSESSMENT_CONFIGS[code]) {
+        resetAssessmentWorkflowState({ preserveMbtiBootstrap: code === "mbti" });
         state.assessmentTypeCode = code;
         document.getElementById("assessmentHome").classList.add("hidden");
         document.getElementById("pipelineApp").classList.remove("hidden");
@@ -1123,6 +1154,7 @@
       window.addEventListener("popstate", function () {
         const next = new URLSearchParams(window.location.search).get("assessment");
         if (next && ASSESSMENT_CONFIGS[next]) {
+          resetAssessmentWorkflowState({ preserveMbtiBootstrap: next === "mbti" });
           state.assessmentTypeCode = next;
           document.getElementById("assessmentHome").classList.add("hidden");
           document.getElementById("pipelineApp").classList.remove("hidden");
