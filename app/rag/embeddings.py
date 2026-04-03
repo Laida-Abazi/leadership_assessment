@@ -18,6 +18,7 @@ from app.db.models.embeddings import (
 )
 from app.db.models.assessments import Assessments
 from app.db.models.job_requirements import JobRequirements
+from app.services.assessment_persistence import get_assessment_item_payloads
 
 # Content types for content_type column; must match DB/model usage.
 CONTENT_TYPE_REQUIREMENT = "requirement"
@@ -100,14 +101,26 @@ def index_assessment(
                 "content": val.strip(),
             })
 
-    # Questions from assessment
-    for col, content_type in ASSESSMENT_COLUMN_TO_CONTENT_TYPE.items():
-        question_text = getattr(assessment, col, None)
-        if question_text and isinstance(question_text, str) and question_text.strip():
-            to_insert.append({
-                "content_type": content_type,
-                "content": question_text.strip(),
-            })
+    # Questions/items from assessment. Prefer canonical assessment_items when available.
+    item_payloads = get_assessment_item_payloads(db, assessment)
+    if item_payloads:
+        for item in item_payloads:
+            question_text = item.get("prompt_text")
+            if question_text and isinstance(question_text, str) and question_text.strip():
+                to_insert.append(
+                    {
+                        "content_type": item.get("item_key") or "question",
+                        "content": question_text.strip(),
+                    }
+                )
+    else:
+        for col, content_type in ASSESSMENT_COLUMN_TO_CONTENT_TYPE.items():
+            question_text = getattr(assessment, col, None)
+            if question_text and isinstance(question_text, str) and question_text.strip():
+                to_insert.append({
+                    "content_type": content_type,
+                    "content": question_text.strip(),
+                })
 
     if not to_insert:
         return 0

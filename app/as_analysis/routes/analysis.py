@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.as_requirements.config.models_setup import get_openai_client, MODEL_FULL
 from app.db import get_db
 from app.db.models import Assessments, JobRequirements, Responses, Analysis, Predictions
+from app.services.assessment_persistence import iter_assessment_answers
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 
@@ -90,21 +91,17 @@ def _job_requirements_to_summary(job: JobRequirements) -> str:
     return "\n".join(parts) if parts else "No structured requirements provided."
 
 
-def _build_qa_block(assessment: Assessments, responses: Responses | None) -> str:
+def _build_qa_block(db: Session, assessment: Assessments, responses: Responses | None) -> str:
     """Build a single text block of question type, question, and response for each answered question."""
-    if not responses:
-        return "No responses recorded."
+    del responses  # Canonical answers are the source of truth when available.
     lines = []
-    for field in ASSESSMENT_QUESTION_FIELDS:
-        question = getattr(assessment, field, None)
-        resp_field = field.replace("_question", "_response")
-        answer = getattr(responses, resp_field, None) if responses else None
-        if not question or not isinstance(question, str) or not question.strip():
+    for payload in iter_assessment_answers(db, assessment):
+        question = payload.get("question_text")
+        answer = payload.get("answer_text") or "(No response)"
+        if not question:
             continue
-        if not answer or not isinstance(answer, str) or not answer.strip():
-            answer = "(No response)"
-        label = field.replace("_", " ").title()
-        lines.append(f"[{label}]\nQ: {question.strip()}\nA: {(answer or '').strip()}\n")
+        label = payload.get("display_label") or payload.get("item_key", "Question").replace("_", " ").title()
+        lines.append(f"[{label}]\nQ: {question.strip()}\nA: {answer.strip()}\n")
     return "\n".join(lines) if lines else "No responses recorded."
 
 
@@ -211,7 +208,7 @@ def run_analysis(
         )
 
     job_summary = _job_requirements_to_summary(job)
-    qa_block = _build_qa_block(assessment, responses)
+    qa_block = _build_qa_block(db, assessment, responses)
     result = _run_fits_gaps_and_prediction(job_summary, qa_block)
 
     analysis_row, prediction_row = _save_analysis_and_prediction(

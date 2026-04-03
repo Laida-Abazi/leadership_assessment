@@ -20,8 +20,18 @@ import openai
 from sqlalchemy.exc import IntegrityError
 
 from app.db import SessionLocal
-from app.db.models import Analysis, JobRequirements, Predictions, ResponseSegment, ResponseSignal, Responses
+from app.db.models import (
+    Analysis,
+    AssessmentResult,
+    Assessments,
+    JobRequirements,
+    Predictions,
+    ResponseSegment,
+    ResponseSignal,
+)
 from app.db.models.job_requirement_profile import JobRequirementProfile
+from app.services.assessment_persistence import ensure_responses_row, iter_assessment_answers
+from app.services.assessment_scoring import evaluate_assessment
 
 logger = logging.getLogger(__name__)
 
@@ -46,20 +56,6 @@ ROLE_READY_MIN_FIT = 0.80
 ROLE_PARTIAL_MIN_FIT = 0.60
 ROLE_READY_MAX_GAPS = 1
 ROLE_PARTIAL_MAX_GAPS = 3
-
-LEGACY_RESPONSE_FIELDS = [
-    "behavioral_response",
-    "competency_based_response",
-    "situational_response",
-    "panel_response",
-    "business_case_response",
-    "live_simulation_response",
-    "psychometric_response",
-    "structured_reference_response",
-    "culture_alignment_response",
-    "integrity_ethics_response",
-]
-
 
 def _get_openai_client() -> openai.OpenAI:
     api_key = os.environ.get("OPENAI_API_KEY")
@@ -328,14 +324,17 @@ async def rebuild_segments_and_signals_from_responses(assessment_id: int) -> tup
     """
     db = SessionLocal()
     try:
-        row = (
-            db.query(Responses)
-            .filter(Responses.assessment_id == assessment_id)
-            .first()
-        )
-        if not row:
+        assessment = db.get(Assessments, assessment_id)
+        if not assessment:
             logger.warning(
-                "[intelligence] rebuild skipped: no Responses row for assessment_id=%s",
+                "[intelligence] rebuild skipped: no assessment for assessment_id=%s",
+                assessment_id,
+            )
+            return 0, 0
+        answer_payloads = iter_assessment_answers(db, assessment)
+        if not any((payload.get("answer_text") or "").strip() for payload in answer_payloads):
+            logger.warning(
+                "[intelligence] rebuild skipped: no saved answers for assessment_id=%s",
                 assessment_id,
             )
             return 0, 0
@@ -350,16 +349,16 @@ async def rebuild_segments_and_signals_from_responses(assessment_id: int) -> tup
 
         rebuilt_segments: list[tuple[int, str, str]] = []
         sequence_order = 0
-        for field in LEGACY_RESPONSE_FIELDS:
-            text = (getattr(row, field, None) or "").strip()
+        for payload in answer_payloads:
+            text = (payload.get("answer_text") or "").strip()
             if not text:
                 continue
             sequence_order += 1
-            response_type = field.replace("_response", "")
+            response_type = payload["item_key"]
             seg = ResponseSegment(
                 assessment_id=assessment_id,
                 response_type=response_type,
-                question_id=field,
+                question_id=payload["item_key"],
                 segment_text=text,
                 sequence_order=sequence_order,
             )
@@ -831,22 +830,21 @@ async def run_full_analysis(assessment_id: int, job_requirements_id: int) -> Non
         len(agg_traits),
     )
 
-    # Step 2 — job fit
-    logger.info("[intelligence] Step 2/5 compare_traits_to_job_profile start (assessment_id=%s)", assessment_id)
-    fit_data = await compare_traits_to_job_profile(aggregated_data, job_requirements_id)
-    logger.info(
-        "[intelligence] Step 2/5 compare_traits_to_job_profile done (assessment_id=%s fit_score=%s)",
-        assessment_id,
-        fit_data.get("fit_score"),
+    # Step 2-3 — type-specific evaluation on top of shared aggregation.
+    logger.info("[intelligence] Step 2-3/5 evaluation start (assessment_id=%s)", assessment_id)
+    evaluation = await evaluate_assessment(
+        assessment_id=assessment_id,
+        job_requirements_id=job_requirements_id,
+        aggregated_data=aggregated_data,
+        compare_traits_to_job_profile=compare_traits_to_job_profile,
+        generate_narrative=_generate_narrative,
+        get_openai_client=_get_openai_client,
+        responses_create_async=_responses_create_async,
     )
-
-    # Step 3 — narrative summary
-    logger.info("[intelligence] Step 3/5 _generate_narrative start (assessment_id=%s)", assessment_id)
-    narrative = await _generate_narrative(aggregated_data, fit_data)
     logger.info(
-        "[intelligence] Step 3/5 _generate_narrative done (assessment_id=%s narrative_len=%s)",
+        "[intelligence] Step 2-3/5 evaluation done (assessment_id=%s fit_score=%s)",
         assessment_id,
-        len(narrative or ""),
+        evaluation.shared_result.get("fit_score"),
     )
 
     # Steps 4 & 5 — persist
@@ -858,12 +856,14 @@ async def run_full_analysis(assessment_id: int, job_requirements_id: int) -> Non
             assessment_id=assessment_id,
             job_requirements_id=job_requirements_id,
             aggregated_data=aggregated_data,
-            fit_data=fit_data,
-            narrative=narrative,
+            shared_result=evaluation.shared_result,
+            type_result=evaluation.type_result,
+            narrative=evaluation.narrative,
+            prediction_text=evaluation.prediction_text,
         )
         logger.info(
             "[intelligence] Step 4-5/5 _upsert_analysis done (assessment_id=%s fit_score=%s)",
-            assessment_id, fit_data.get("fit_score"),
+            assessment_id, evaluation.shared_result.get("fit_score"),
         )
     except Exception as exc:
         logger.exception("[intelligence] run_full_analysis FAILED (persist): %s", exc)
@@ -1032,30 +1032,26 @@ async def _bootstrap_segments_from_legacy_responses(assessment_id: int) -> int:
         if existing:
             return 0
 
-        row = (
-            db.query(Responses)
-            .filter(Responses.assessment_id == assessment_id)
-            .first()
-        )
-        if not row:
+        assessment = db.get(Assessments, assessment_id)
+        if not assessment:
             return 0
+        answer_payloads = iter_assessment_answers(db, assessment)
 
         created = 0
         sequence_order = 0
-        for field in LEGACY_RESPONSE_FIELDS:
-            raw = getattr(row, field, None)
-            text = (raw or "").strip()
+        for payload in answer_payloads:
+            text = (payload.get("answer_text") or "").strip()
             if not text:
                 continue
             # Keep chunks reasonably sized for signal extraction quality.
             chunks = _chunk_text(text, chunk_size=700)
-            response_type = field.replace("_response", "")
+            response_type = payload["item_key"]
             for chunk in chunks:
                 sequence_order += 1
                 seg = ResponseSegment(
                     assessment_id=assessment_id,
                     response_type=response_type,
-                    question_id=None,
+                    question_id=payload["item_key"],
                     segment_text=chunk,
                     sequence_order=sequence_order,
                 )
@@ -1148,8 +1144,10 @@ def _upsert_analysis(
     assessment_id: int,
     job_requirements_id: int,
     aggregated_data: dict,
-    fit_data: dict,
+    shared_result: dict,
+    type_result: dict,
     narrative: str,
+    prediction_text: str,
 ) -> None:
     """Write or update the Analysis and Predictions rows for this assessment."""
     analysis_row = (
@@ -1162,18 +1160,11 @@ def _upsert_analysis(
     consistency = aggregated_data.get("consistency_scores")
     contradictions = aggregated_data.get("contradictions")
     patterns = aggregated_data.get("behavioral_patterns")
-    trait_gaps = fit_data.get("trait_gaps")
+    trait_gaps = shared_result.get("trait_gaps")
 
     if analysis_row is None:
-        # No existing analysis row — create a minimal one.
-        # responses_id is required (not nullable); look up the responses row.
-        from app.db.models import Responses
-        responses_row = (
-            db.query(Responses)
-            .filter(Responses.assessment_id == assessment_id)
-            .first()
-        )
-        responses_id = responses_row.id if responses_row else 0
+        responses_row = ensure_responses_row(db, assessment_id)
+        responses_id = responses_row.id
         logger.info(
             "[intelligence] _upsert_analysis creating Analysis (assessment_id=%s responses_id=%s)",
             assessment_id,
@@ -1213,9 +1204,9 @@ def _upsert_analysis(
         .filter(Predictions.analysis_id == analysis_row.id)
         .first()
     )
-    fit_score = fit_data.get("fit_score")
-    risk_flags = _build_risk_flags(aggregated_data, fit_data)
-    hiring_recommendation = _hiring_recommendation(fit_score, risk_flags)
+    fit_score = shared_result.get("fit_score")
+    risk_flags = shared_result.get("risk_flags") or []
+    hiring_recommendation = prediction_text or _hiring_recommendation(fit_score, risk_flags)
 
     if pred_row is None:
         logger.info(
@@ -1227,7 +1218,7 @@ def _upsert_analysis(
             analysis_id=analysis_row.id,
             prediction=hiring_recommendation,
             fit_score=fit_score,
-            confidence_score=_overall_confidence(aggregated_data),
+            confidence_score=shared_result.get("confidence_score", _overall_confidence(aggregated_data)),
             risk_flags=risk_flags,
         )
         db.add(pred_row)
@@ -1240,14 +1231,38 @@ def _upsert_analysis(
         )
         pred_row.prediction = hiring_recommendation
         pred_row.fit_score = fit_score
-        pred_row.confidence_score = _overall_confidence(aggregated_data)
+        pred_row.confidence_score = shared_result.get("confidence_score", _overall_confidence(aggregated_data))
         pred_row.risk_flags = risk_flags
+
+    result_row = (
+        db.query(AssessmentResult)
+        .filter(AssessmentResult.assessment_id == assessment_id)
+        .first()
+    )
+    if result_row is None:
+        result_row = AssessmentResult(
+            assessment_id=assessment_id,
+            shared_result_json=shared_result,
+            type_result_json=type_result,
+            narrative=narrative,
+            fit_score=fit_score,
+            confidence_score=shared_result.get("confidence_score", _overall_confidence(aggregated_data)),
+            risk_flags=risk_flags,
+        )
+        db.add(result_row)
+    else:
+        result_row.shared_result_json = shared_result
+        result_row.type_result_json = type_result
+        result_row.narrative = narrative
+        result_row.fit_score = fit_score
+        result_row.confidence_score = shared_result.get("confidence_score", _overall_confidence(aggregated_data))
+        result_row.risk_flags = risk_flags
 
     logger.info(
         "[intelligence] _upsert_analysis prepared commit (assessment_id=%s fit_score=%s confidence_score=%s risk_flags_count=%s)",
         assessment_id,
         fit_score,
-        _overall_confidence(aggregated_data),
+        shared_result.get("confidence_score", _overall_confidence(aggregated_data)),
         len(risk_flags or []),
     )
     db.commit()

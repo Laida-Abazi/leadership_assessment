@@ -28,18 +28,32 @@ from app.as_blueprinting.routes.assessment import router as assessments_router
 from app.as_analysis.routes.analysis import router as analysis_router
 from app.auth.register import router as auth_router
 from app.agent.routes import router as agent_router
+from app.db import SessionLocal
 from app.routers.intelligence import router as intelligence_router
+from app.services.assessment_registry import ensure_assessment_types_seeded
 
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     load_dotenv()
+    db = SessionLocal()
+    try:
+        try:
+            ensure_assessment_types_seeded(db)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Assessment type registry could not be seeded during startup. "
+                "Run the latest migrations before using multi-assessment features.",
+                exc_info=True,
+            )
+    finally:
+        db.close()
     yield
 
 
 app = FastAPI(
-    title="Leadership Assessment",
+    title="Multi Assessment Agent",
     lifespan=lifespan,
 )
 

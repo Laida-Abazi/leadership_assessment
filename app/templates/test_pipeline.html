@@ -43,6 +43,74 @@
       font-size: 0.9rem;
       margin-bottom: 2rem;
     }
+    .home {
+      width: 100%;
+      max-width: 1480px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .home.hidden,
+    .workflow-shell.hidden {
+      display: none;
+    }
+    .assessment-grid {
+      width: 100%;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 1.5rem;
+      margin-top: 1.5rem;
+    }
+    .assessment-tile {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 2rem;
+      min-height: 220px;
+      text-align: left;
+      cursor: pointer;
+      transition: border-color 0.2s, transform 0.12s, background 0.2s;
+    }
+    .assessment-tile:hover {
+      border-color: var(--accent);
+      background: #20202a;
+      transform: translateY(-2px);
+    }
+    .assessment-tile h2 {
+      font-size: 1.2rem;
+      margin-bottom: 0.75rem;
+      letter-spacing: -0.02em;
+      color: var(--text);
+    }
+    .assessment-tile p {
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 0.92rem;
+    }
+    .workflow-shell {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .topbar {
+      width: 100%;
+      max-width: 640px;
+      display: flex;
+      justify-content: flex-start;
+      margin-bottom: 1rem;
+    }
+    .text-button {
+      background: transparent;
+      border: 0;
+      color: var(--muted);
+      padding: 0;
+      font-size: 0.9rem;
+    }
+    .text-button:hover {
+      color: var(--text);
+      background: transparent;
+    }
 
     /* ── Stepper ── */
     .stepper {
@@ -128,7 +196,7 @@
       color: var(--muted);
       margin-bottom: 0.35rem;
     }
-    textarea, input[type="number"], input[type="text"] {
+    textarea, input[type="number"], input[type="text"], select {
       width: 100%;
       background: var(--surface-alt);
       border: 1px solid var(--border);
@@ -349,135 +417,252 @@
       line-height: 1.5;
       text-align: center;
     }
+    @media (max-width: 720px) {
+      .assessment-grid {
+        grid-template-columns: 1fr;
+      }
+      .form-row {
+        flex-direction: column;
+      }
+      .btn-row {
+        flex-direction: column;
+      }
+    }
   </style>
 </head>
 <body>
+  <section id="assessmentHome" class="home">
+    <h1>Assessment Testing</h1>
+    <p class="subtitle">Choose an assessment to open its dedicated test flow.</p>
+    <div class="assessment-grid">
+      <button type="button" class="assessment-tile" onclick="openAssessmentFlow('leadership_core')">
+        <h2>Technical Assessment</h2>
+        <p>Use the full job-requirements to interview pipeline for the existing leadership or technical assessment flow.</p>
+      </button>
+      <button type="button" class="assessment-tile" onclick="openAssessmentFlow('mbti')">
+        <h2>MBTI</h2>
+        <p>Open the MBTI testing flow directly. This UI skips the visible professional profile step and takes you straight into assessment generation.</p>
+      </button>
+      <button type="button" class="assessment-tile" onclick="openAssessmentFlow('slii')">
+        <h2>SII</h2>
+        <p>Open the situational leadership testing flow with its own interview and prediction path.</p>
+      </button>
+    </div>
+  </section>
 
-  <h1>Leadership Assessment</h1>
-  <p class="subtitle">End-to-end pipeline testing</p>
+  <section id="pipelineApp" class="workflow-shell hidden">
+    <div class="topbar">
+      <button type="button" class="text-button" onclick="backToAssessmentHome()">&larr; All assessments</button>
+    </div>
 
-  <!-- Stepper -->
-  <div class="stepper">
-    <div class="step active" data-step="1">
-      <div class="step-num">1</div>
-      <span class="step-label">Requirements</span>
-    </div>
-    <div class="step-line" data-line="1"></div>
-    <div class="step" data-step="2">
-      <div class="step-num">2</div>
-      <span class="step-label">Assessment</span>
-    </div>
-    <div class="step-line" data-line="2"></div>
-    <div class="step" data-step="3">
-      <div class="step-num">3</div>
-      <span class="step-label">Interview</span>
-    </div>
-    <div class="step-line" data-line="3"></div>
-    <div class="step" data-step="4">
-      <div class="step-num">4</div>
-      <span class="step-label">Prediction</span>
-    </div>
-  </div>
+    <h1 id="pageTitle">Assessment Flow</h1>
+    <p class="subtitle" id="pageSubtitle">End-to-end testing flow</p>
 
-  <!-- Phase 1: Job Requirements Analysis -->
-  <div class="card visible" id="phase1">
-    <h2>Job Requirements Analysis</h2>
-    <p class="desc">Paste a job description below. The system will extract structured requirements using GPT.</p>
-    <div class="form-group">
-      <label for="jobDesc">Job Description</label>
-      <textarea id="jobDesc" placeholder="Paste the full job description here..."></textarea>
-    </div>
-    <div class="btn-row">
-      <button class="btn-primary" id="analyzeBtn" onclick="analyzeJob()">Analyze</button>
-    </div>
-    <div class="status-bar" id="phase1Status">
-      <div class="spinner"></div>
-      <span id="phase1StatusText">Analyzing...</span>
-    </div>
-    <div class="result-panel" id="phase1Result">
-      <h3>Extracted Requirements</h3>
-      <div id="requirementsBody"></div>
-    </div>
-    <div class="btn-row" id="phase1Continue" style="display:none;">
-      <button class="btn-success" onclick="goToPhase(2)">Continue to Assessment &rarr;</button>
-    </div>
-  </div>
+    <!-- Stepper -->
+    <div class="stepper" id="stepper"></div>
 
-  <!-- Phase 2: Generate Assessment -->
-  <div class="card" id="phase2">
-    <h2>Generate Assessment</h2>
-    <p class="desc">Generate 10 tailored interview questions from the extracted job requirements.</p>
-    <div class="form-row">
-      <div>
-        <label for="jobReqId">Job Requirements ID</label>
-        <input type="number" id="jobReqId" readonly>
+    <!-- Phase 1: Job Requirements Analysis -->
+    <div class="card visible" id="phase1">
+      <h2 id="phase1Title">Job Requirements Analysis</h2>
+      <p class="desc" id="phase1Desc">Paste a job description below. The system will extract structured requirements using GPT.</p>
+      <div class="form-group">
+        <label for="jobDesc">Job Description</label>
+        <textarea id="jobDesc" placeholder="Paste the full job description here..."></textarea>
       </div>
-      <div>
-        <label for="userId">User ID</label>
-        <input type="number" id="userId" value="1" min="1">
+      <div class="btn-row">
+        <button class="btn-primary" id="analyzeBtn" onclick="analyzeJob()">Analyze</button>
+      </div>
+      <div class="status-bar" id="phase1Status">
+        <div class="spinner"></div>
+        <span id="phase1StatusText">Analyzing...</span>
+      </div>
+      <div class="result-panel" id="phase1Result">
+        <h3>Extracted Requirements</h3>
+        <div id="requirementsBody"></div>
+      </div>
+      <div class="btn-row" id="phase1Continue" style="display:none;">
+        <button class="btn-success" onclick="goToPhase(2)">Continue to Assessment &rarr;</button>
       </div>
     </div>
-    <div class="btn-row">
-      <button class="btn-secondary" onclick="goToPhase(1)">&larr; Back</button>
-      <button class="btn-primary" id="generateBtn" onclick="generateAssessment()">Generate Questions</button>
-    </div>
-    <div class="status-bar" id="phase2Status">
-      <div class="spinner"></div>
-      <span id="phase2StatusText">Generating...</span>
-    </div>
-    <div class="result-panel" id="phase2Result">
-      <h3>Assessment Questions</h3>
-      <div id="questionsBody"></div>
-    </div>
-    <div class="btn-row" id="phase2Continue" style="display:none;">
-      <button class="btn-success" onclick="goToPhase(3)">Continue to Interview &rarr;</button>
-    </div>
-  </div>
 
-  <!-- Phase 3: Interview -->
-  <div class="card" id="phase3">
-    <h2>Conduct Interview</h2>
-    <p class="desc">Start a voice interview with the AI agent. The agent will ask the generated questions one by one and record your responses.</p>
-    <div class="interview-link" id="interviewLinkBox">
-      <a id="interviewLink" href="#" target="_blank">Open Voice Interview &rarr;</a>
-      <p class="hint">Opens in a new tab. Complete the interview, then come back and click Continue.</p>
-    </div>
-    <div class="btn-row">
-      <button class="btn-secondary" onclick="goToPhase(2)">&larr; Back</button>
-      <button class="btn-success" id="phase3ContinueBtn" onclick="goToPhase(4)">Continue to Prediction &rarr;</button>
-    </div>
-  </div>
-
-  <!-- Phase 4: Prediction -->
-  <div class="card" id="phase4">
-    <h2>Prediction</h2>
-    <p class="desc">Run a detailed gap analysis of the interview against role requirements.</p>
-    <div class="form-group">
-      <label for="assessmentIdPred">Assessment ID</label>
-      <input type="number" id="assessmentIdPred" readonly>
-    </div>
-    <div class="btn-row">
-      <button class="btn-secondary" onclick="goToPhase(3)">&larr; Back</button>
-      <button class="btn-primary" id="predictBtn" onclick="runPrediction()">Run Prediction</button>
-    </div>
-    <div class="status-bar" id="phase4Status">
-      <div class="spinner"></div>
-      <span id="phase4StatusText">Analyzing...</span>
-    </div>
-    <div class="result-panel" id="phase4Result">
-      <div class="verdict-card">
-        <div class="analysis-title">Detailed Gap Analysis</div>
-        <div class="analysis-subtitle">Evidence-based strengths, gaps, and risk implications</div>
-        <div id="rationaleText" class="rationale-text"></div>
+    <!-- Phase 2: Generate Assessment -->
+    <div class="card" id="phase2">
+      <h2 id="phase2Title">Generate Assessment</h2>
+      <p class="desc" id="phase2Desc">Generate an assessment from a reusable type definition.</p>
+      <div class="form-row" id="jobReqGroup">
+        <div>
+          <label for="jobReqId">Job Requirements ID</label>
+          <input type="number" id="jobReqId" readonly>
+        </div>
+        <div>
+          <label for="userId">User ID</label>
+          <input type="number" id="userId" value="1" min="1">
+        </div>
+      </div>
+      <div class="form-row" id="userOnlyGroup" style="display:none;">
+        <div>
+          <label for="userIdMbti">User ID</label>
+          <input type="number" id="userIdMbti" value="1" min="1">
+        </div>
+      </div>
+      <div class="form-group" id="assessmentTypeGroup" style="display:none;">
+        <label for="assessmentType">Assessment Type</label>
+        <select id="assessmentType">
+          <option value="leadership_core">Leadership Core</option>
+          <option value="mbti">MBTI</option>
+          <option value="slii">SLII</option>
+        </select>
+      </div>
+      <div class="btn-row">
+        <button class="btn-secondary" onclick="goToPhase(1)">&larr; Back</button>
+        <button class="btn-primary" id="generateBtn" onclick="generateAssessment()">Generate Assessment</button>
+      </div>
+      <div class="status-bar" id="phase2Status">
+        <div class="spinner"></div>
+        <span id="phase2StatusText">Generating...</span>
+      </div>
+      <div class="result-panel" id="phase2Result">
+        <h3 id="phase2ResultTitle">Assessment Questions</h3>
+        <div id="questionsBody"></div>
+      </div>
+      <div class="btn-row" id="phase2Continue" style="display:none;">
+        <button class="btn-success" onclick="goToPhase(3)">Continue to Interview &rarr;</button>
       </div>
     </div>
-  </div>
+
+    <!-- Phase 3: Interview -->
+    <div class="card" id="phase3">
+      <h2 id="phase3Title">Conduct Interview</h2>
+      <p class="desc" id="phase3Desc">Start a voice interview with the AI agent.</p>
+      <div class="interview-link" id="interviewLinkBox">
+        <a id="interviewLink" href="#" target="_blank">Open Voice Interview &rarr;</a>
+        <p class="hint">Opens in a new tab. Complete the interview, then come back and click Continue.</p>
+      </div>
+      <div class="btn-row">
+        <button class="btn-secondary" onclick="goToPhase(2)">&larr; Back</button>
+        <button class="btn-success" id="phase3ContinueBtn" onclick="goToPhase(4)">Continue to Prediction &rarr;</button>
+      </div>
+    </div>
+
+    <!-- Phase 4: Prediction -->
+    <div class="card" id="phase4">
+      <h2 id="phase4Title">Prediction</h2>
+      <p class="desc" id="phase4Desc">Run a detailed gap analysis of the interview.</p>
+      <div class="form-group">
+        <label for="assessmentIdPred">Assessment ID</label>
+        <input type="number" id="assessmentIdPred" readonly>
+      </div>
+      <div class="btn-row">
+        <button class="btn-secondary" onclick="goToPhase(3)">&larr; Back</button>
+        <button class="btn-primary" id="predictBtn" onclick="runPrediction()">Run Prediction</button>
+      </div>
+      <div class="status-bar" id="phase4Status">
+        <div class="spinner"></div>
+        <span id="phase4StatusText">Analyzing...</span>
+      </div>
+      <div class="result-panel" id="phase4Result">
+        <div class="verdict-card">
+          <div class="analysis-title">Detailed Gap Analysis</div>
+          <div class="analysis-subtitle">Evidence-based strengths, gaps, and risk implications</div>
+          <div id="rationaleText" class="rationale-text"></div>
+        </div>
+      </div>
+    </div>
+  </section>
 
   <script>
     const state = {
-      phase: 1,
+      phase: null,
       jobRequirementsId: null,
       assessmentId: null,
+      assessmentTypeCode: null,
+      mbtiBootstrapJobRequirementsId: null,
+    };
+
+    const MBTI_BOOTSTRAP_JOB_DESCRIPTION = [
+      "This is a generic MBTI self-reflection assessment used for testing a conversational personality-preference flow.",
+      "There is no role-specific professional profile required.",
+      "Context should stay broad and workplace-friendly, focusing on communication style, decision-making, work habits, collaboration preferences, energy orientation, and planning style.",
+      "Use a neutral professional setting only."
+    ].join(" ");
+
+    const ASSESSMENT_CONFIGS = {
+      leadership_core: {
+        title: "Technical Assessment",
+        subtitle: "Full end-to-end flow with requirements, assessment generation, interview, and prediction.",
+        steps: [
+          { phase: 1, label: "Requirements" },
+          { phase: 2, label: "Assessment" },
+          { phase: 3, label: "Interview" },
+          { phase: 4, label: "Prediction" },
+        ],
+        phase1: {
+          title: "Job Requirements Analysis",
+          desc: "Paste a job description below. The system will extract structured requirements using GPT.",
+        },
+        phase2: {
+          title: "Generate Assessment",
+          desc: "Generate the assessment from the extracted job requirements.",
+          resultTitle: "Assessment Questions",
+        },
+        phase3: {
+          title: "Conduct Interview",
+          desc: "Start a voice interview with the AI agent. The agent will ask the generated questions one by one and record your responses.",
+        },
+        phase4: {
+          title: "Prediction",
+          desc: "Run a detailed gap analysis of the interview against role requirements.",
+        },
+      },
+      mbti: {
+        title: "MBTI",
+        subtitle: "Dedicated MBTI UI with no visible job-requirements step.",
+        steps: [
+          { phase: 2, label: "Assessment" },
+          { phase: 3, label: "Interview" },
+          { phase: 4, label: "Prediction" },
+        ],
+        phase2: {
+          title: "Generate MBTI Assessment",
+          desc: "Generate a fresh MBTI-style assessment. This UI skips the professional profile step and goes straight to assessment generation.",
+          resultTitle: "MBTI Questions",
+        },
+        phase3: {
+          title: "Conduct MBTI Interview",
+          desc: "Open the voice interview and answer each MBTI question in sequence.",
+        },
+        phase4: {
+          title: "MBTI Prediction",
+          desc: "Run the post-interview MBTI analysis and review the generated insight summary.",
+        },
+      },
+      slii: {
+        title: "SII",
+        subtitle: "Scenario-based situational leadership flow with dedicated testing steps.",
+        steps: [
+          { phase: 1, label: "Requirements" },
+          { phase: 2, label: "Assessment" },
+          { phase: 3, label: "Interview" },
+          { phase: 4, label: "Prediction" },
+        ],
+        phase1: {
+          title: "Scenario Context",
+          desc: "Paste a role or leadership context below. The system will extract structured context before generating the SII assessment.",
+        },
+        phase2: {
+          title: "Generate SII Assessment",
+          desc: "Generate a situational leadership assessment from the extracted context.",
+          resultTitle: "SII Questions",
+        },
+        phase3: {
+          title: "Conduct SII Interview",
+          desc: "Start the voice interview. The agent will ask the generated situational leadership questions one by one.",
+        },
+        phase4: {
+          title: "SII Prediction",
+          desc: "Run the post-interview analysis and review the generated situational leadership summary.",
+        },
+      },
     };
 
     const REQUIREMENT_LABELS = {
@@ -511,26 +696,127 @@
       integrity_ethics_question: "Integrity & Ethics",
     };
 
+    function getActiveConfig() {
+      return ASSESSMENT_CONFIGS[state.assessmentTypeCode] || null;
+    }
+
+    function getUserId() {
+      const activeConfig = getActiveConfig();
+      if (activeConfig && state.assessmentTypeCode === "mbti") {
+        return parseInt(document.getElementById("userIdMbti").value, 10);
+      }
+      return parseInt(document.getElementById("userId").value, 10);
+    }
+
+    function renderStepper() {
+      const stepper = document.getElementById("stepper");
+      const activeConfig = getActiveConfig();
+      if (!stepper || !activeConfig) return;
+      stepper.innerHTML = "";
+      activeConfig.steps.forEach((step, index) => {
+        const stepEl = document.createElement("div");
+        stepEl.className = "step";
+        stepEl.dataset.phase = String(step.phase);
+        stepEl.innerHTML = '<div class="step-num">' + (index + 1) + '</div><span class="step-label">' + escapeHtml(step.label) + "</span>";
+        stepper.appendChild(stepEl);
+        if (index < activeConfig.steps.length - 1) {
+          const line = document.createElement("div");
+          line.className = "step-line";
+          line.dataset.index = String(index);
+          stepper.appendChild(line);
+        }
+      });
+    }
+
+    function applyAssessmentUI() {
+      const activeConfig = getActiveConfig();
+      if (!activeConfig) return;
+
+      document.title = activeConfig.title + " – Pipeline Test";
+      document.getElementById("pageTitle").textContent = activeConfig.title;
+      document.getElementById("pageSubtitle").textContent = activeConfig.subtitle;
+      document.getElementById("assessmentType").value = state.assessmentTypeCode;
+
+      document.getElementById("phase1Title").textContent = (activeConfig.phase1 || {}).title || "Job Requirements Analysis";
+      document.getElementById("phase1Desc").textContent = (activeConfig.phase1 || {}).desc || "";
+      document.getElementById("phase2Title").textContent = activeConfig.phase2.title;
+      document.getElementById("phase2Desc").textContent = activeConfig.phase2.desc;
+      document.getElementById("phase2ResultTitle").textContent = activeConfig.phase2.resultTitle;
+      document.getElementById("phase3Title").textContent = activeConfig.phase3.title;
+      document.getElementById("phase3Desc").textContent = activeConfig.phase3.desc;
+      document.getElementById("phase4Title").textContent = activeConfig.phase4.title;
+      document.getElementById("phase4Desc").textContent = activeConfig.phase4.desc;
+
+      const showPhase1 = activeConfig.steps.some(step => step.phase === 1);
+      document.getElementById("phase1").style.display = showPhase1 ? "block" : "none";
+      document.getElementById("jobReqGroup").style.display = state.assessmentTypeCode === "mbti" ? "none" : "flex";
+      document.getElementById("userOnlyGroup").style.display = state.assessmentTypeCode === "mbti" ? "flex" : "none";
+
+      renderStepper();
+    }
+
+    function openAssessmentFlow(code) {
+      if (!ASSESSMENT_CONFIGS[code]) return;
+      state.assessmentTypeCode = code;
+      state.assessmentId = null;
+      const url = new URL(window.location.href);
+      url.searchParams.set("assessment", code);
+      window.history.pushState({}, "", url);
+
+      document.getElementById("assessmentHome").classList.add("hidden");
+      document.getElementById("pipelineApp").classList.remove("hidden");
+      applyAssessmentUI();
+
+      const activeConfig = getActiveConfig();
+      const firstPhase = activeConfig.steps[0].phase;
+      goToPhase(firstPhase);
+    }
+
+    function backToAssessmentHome(options) {
+      const suppressHistory = options && options.suppressHistory;
+      const url = new URL(window.location.href);
+      url.searchParams.delete("assessment");
+      if (!suppressHistory) {
+        window.history.pushState({}, "", url);
+      }
+      document.getElementById("assessmentHome").classList.remove("hidden");
+      document.getElementById("pipelineApp").classList.add("hidden");
+      state.phase = null;
+      state.assessmentTypeCode = null;
+      document.title = "Assessment Testing";
+    }
+
     function goToPhase(n) {
+      const activeConfig = getActiveConfig();
+      if (!activeConfig) return;
+      if (!activeConfig.steps.some(step => step.phase === n)) {
+        const firstPhase = activeConfig.steps[0].phase;
+        if (n < firstPhase) {
+          backToAssessmentHome();
+          return;
+        }
+        n = firstPhase;
+      }
       state.phase = n;
       document.querySelectorAll(".card").forEach(c => c.classList.remove("visible"));
       document.getElementById("phase" + n).classList.add("visible");
 
-      document.querySelectorAll(".step").forEach(s => {
-        const sn = parseInt(s.dataset.step);
+      document.querySelectorAll("#stepper .step").forEach(s => {
+        const sn = parseInt(s.dataset.phase, 10);
         s.classList.remove("active", "done");
         if (sn < n) s.classList.add("done");
         else if (sn === n) s.classList.add("active");
       });
-      document.querySelectorAll(".step-line").forEach(l => {
-        const ln = parseInt(l.dataset.line);
-        l.classList.toggle("done", ln < n);
+      const orderedPhases = activeConfig.steps.map(step => step.phase);
+      document.querySelectorAll("#stepper .step-line").forEach((l, index) => {
+        const currentPhase = orderedPhases[index];
+        l.classList.toggle("done", currentPhase < n);
       });
 
       if (n === 3 && state.assessmentId) {
         const link = document.getElementById("interviewLink");
         link.href = "/agent/test?assessment_id=" + state.assessmentId;
-        link.textContent = "Open Voice Interview (Assessment #" + state.assessmentId + ") →";
+        link.textContent = "Open Voice Interview (" + formatAssessmentType(state.assessmentTypeCode) + " #" + state.assessmentId + ") →";
       }
       if (n === 4 && state.assessmentId) {
         document.getElementById("assessmentIdPred").value = state.assessmentId;
@@ -547,6 +833,12 @@
 
     function hideStatus(phaseId) {
       document.getElementById(phaseId + "Status").className = "status-bar";
+    }
+
+    function formatAssessmentType(code) {
+      if (code === "mbti") return "MBTI";
+      if (code === "slii") return "SLII";
+      return "Leadership Core";
     }
 
     async function analyzeJob() {
@@ -567,7 +859,7 @@
           throw new Error(err.detail || res.statusText);
         }
         const data = await res.json();
-        state.jobRequirementsId = data.job_id;
+        state.jobRequirementsId = data.id;
 
         const body = document.getElementById("requirementsBody");
         body.innerHTML = "";
@@ -593,21 +885,54 @@
       }
     }
 
+    async function ensureMbtiJobRequirements() {
+      if (state.mbtiBootstrapJobRequirementsId) {
+        document.getElementById("jobReqId").value = state.mbtiBootstrapJobRequirementsId;
+        return state.mbtiBootstrapJobRequirementsId;
+      }
+      const form = new FormData();
+      form.append("job_description", MBTI_BOOTSTRAP_JOB_DESCRIPTION);
+      const res = await fetch("/job-requirements/analyze", { method: "POST", body: form });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || res.statusText);
+      }
+      const data = await res.json();
+      state.mbtiBootstrapJobRequirementsId = data.id;
+      state.jobRequirementsId = data.id;
+      document.getElementById("jobReqId").value = data.id;
+      return data.id;
+    }
+
     async function generateAssessment() {
-      const jobReqId = parseInt(document.getElementById("jobReqId").value);
-      const userId = parseInt(document.getElementById("userId").value);
-      if (!jobReqId || !userId) { alert("Fill in both Job Requirements ID and User ID."); return; }
+      const assessmentTypeCode = state.assessmentTypeCode || document.getElementById("assessmentType").value;
+      let jobReqId = parseInt(document.getElementById("jobReqId").value, 10);
+      const userId = getUserId();
+      if (!userId) { alert("Fill in the User ID."); return; }
+      if (assessmentTypeCode !== "mbti" && !jobReqId) {
+        alert("Fill in both Job Requirements ID and User ID.");
+        return;
+      }
       const btn = document.getElementById("generateBtn");
       btn.disabled = true;
-      showStatus("phase2", "loading", "Generating assessment questions...");
+      showStatus("phase2", "loading", "Generating assessment...");
       document.getElementById("phase2Result").classList.remove("visible");
       document.getElementById("phase2Continue").style.display = "none";
 
       try {
+        if (assessmentTypeCode === "mbti" && !jobReqId) {
+          showStatus("phase2", "loading", "Preparing MBTI assessment...");
+          jobReqId = await ensureMbtiJobRequirements();
+        }
+        if (!jobReqId || !userId) {
+          throw new Error(assessmentTypeCode === "mbti"
+            ? "Unable to prepare the MBTI assessment context."
+            : "Fill in both Job Requirements ID and User ID.");
+        }
         const res = await fetch("/assessments/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ job_requirements_id: jobReqId, user_id: userId }),
+          body: JSON.stringify({ job_requirements_id: jobReqId, user_id: userId, assessment_type_code: assessmentTypeCode }),
         });
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
@@ -615,16 +940,21 @@
         }
         const data = await res.json();
         state.assessmentId = data.id;
+        state.assessmentTypeCode = data.assessment_type_code || assessmentTypeCode;
 
         const body = document.getElementById("questionsBody");
         body.innerHTML = "";
-        for (const [key, label] of Object.entries(QUESTION_LABELS)) {
-          const val = data[key];
-          if (!val) continue;
-          const item = document.createElement("div");
-          item.className = "question-item";
-          item.innerHTML = '<div class="question-type">' + label + "</div>" + escapeHtml(val);
-          body.appendChild(item);
+        const items = Array.isArray(data.items) ? data.items : Object.entries(QUESTION_LABELS).map(([key, label], index) => ({
+          item_key: key,
+          display_label: label,
+          item_order: index + 1,
+          prompt_text: data[key],
+        })).filter(item => item.prompt_text);
+        for (const itemData of items) {
+          const row = document.createElement("div");
+          row.className = "question-item";
+          row.innerHTML = '<div class="question-type">' + escapeHtml(itemData.display_label || itemData.item_key) + "</div>" + escapeHtml(itemData.prompt_text);
+          body.appendChild(row);
         }
 
         hideStatus("phase2");
@@ -777,6 +1107,32 @@
       html += "</div>";
       return html;
     }
+
+    (function init() {
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get("assessment");
+      if (code && ASSESSMENT_CONFIGS[code]) {
+        state.assessmentTypeCode = code;
+        document.getElementById("assessmentHome").classList.add("hidden");
+        document.getElementById("pipelineApp").classList.remove("hidden");
+        applyAssessmentUI();
+        goToPhase(getActiveConfig().steps[0].phase);
+      } else {
+        backToAssessmentHome({ suppressHistory: true });
+      }
+      window.addEventListener("popstate", function () {
+        const next = new URLSearchParams(window.location.search).get("assessment");
+        if (next && ASSESSMENT_CONFIGS[next]) {
+          state.assessmentTypeCode = next;
+          document.getElementById("assessmentHome").classList.add("hidden");
+          document.getElementById("pipelineApp").classList.remove("hidden");
+          applyAssessmentUI();
+          goToPhase(getActiveConfig().steps[0].phase);
+        } else {
+          backToAssessmentHome({ suppressHistory: true });
+        }
+      });
+    })();
   </script>
 </body>
 </html>

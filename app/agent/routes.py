@@ -18,7 +18,14 @@ from fastapi.responses import FileResponse
 
 from app.as_requirements.config.models_setup import MODEL_MINI, get_openai_client
 from app.db import SessionLocal
-from app.db.models import Assessments, ResponseSegment, Responses, User
+from app.db.models import Assessments, ResponseSegment, User
+from app.services.assessment_persistence import (
+    count_saved_answers,
+    ensure_responses_row_for_assessment,
+    get_assessment_item_payloads,
+    save_assessment_answer,
+)
+from app.services.assessment_registry import get_assessment_definition
 
 logger = logging.getLogger(__name__)
 
@@ -33,27 +40,11 @@ LIVE_MODEL = os.environ.get(
 # Agent voice name.
 AGENT_VOICE = os.environ.get("GEMINI_LIVE_VOICE", "Puck")
 
-# Assessment question columns in order (must match Assessments model).
-ASSESSMENT_QUESTION_FIELDS = [
-    "behavioral_question",
-    "competency_based_question",
-    "situational_question",
-    "panel_question",
-    "business_case_question",
-    "live_simulation_question",
-    "psychometric_question",
-    "structured_reference_question",
-    "culture_alignment_question",
-    "integrity_ethics_question",
-]
-
 DEFAULT_SYSTEM_INSTRUCTION = (
     "You are a friendly, warm voice assistant. Have a natural, conversational chat with the user. "
     "Keep responses concise and conversational so they work well in a voice dialogue. "
     "Be helpful and personable."
 )
-
-RESPONSE_FIELDS = [f.replace("_question", "_response") for f in ASSESSMENT_QUESTION_FIELDS]
 
 # Minimum characters a transcript must have before we bother saving it.
 MIN_TRANSCRIPT_LEN = 20
@@ -76,119 +67,68 @@ def _preview_text(text: str, limit: int = 120) -> str:
         return s
     return s[:limit].rstrip() + "…"
 
-def _assessment_questions_list(assessment: Assessments) -> list[str]:
-    """Return non-empty assessment questions in the canonical order."""
-    out: list[str] = []
-    for field in ASSESSMENT_QUESTION_FIELDS:
-        val = getattr(assessment, field, None)
-        if val and isinstance(val, str) and val.strip():
-            out.append(val.strip())
-    return out
-
-
-def _response_fields_for_assessment(assessment: Assessments) -> list[str]:
-    """Return response column names in the same order as the non-empty questions."""
-    out: list[str] = []
-    for field in ASSESSMENT_QUESTION_FIELDS:
-        val = getattr(assessment, field, None)
-        if val and isinstance(val, str) and val.strip():
-            out.append(field.replace("_question", "_response"))
-    return out
-
-
-def _save_response(assessment_id: int, field_name: str, answer_text: str) -> bool:
-    """Upsert the given response field for this assessment."""
-    db = SessionLocal()
+def _assessment_questions_list(assessment: Assessments, db=None) -> list[str]:
+    """Return canonical assessment prompts in order, preferring normalized items."""
+    owns_session = db is None
+    db = db or SessionLocal()
     try:
-        row = db.query(Responses).filter(Responses.assessment_id == assessment_id).first()
-        if row is None:
-            row = Responses(assessment_id=assessment_id)
-            db.add(row)
-            db.flush()
-        if hasattr(row, field_name):
-            setattr(row, field_name, (answer_text or "").strip() or None)
-        else:
-            logger.warning(
-                "Responses model has no field '%s' (assessment_id=%s) — row will be committed without updating that field.",
-                field_name,
-                assessment_id,
-            )
-        db.commit()
+        item_payloads = get_assessment_item_payloads(db, assessment)
+        return [item["prompt_text"].strip() for item in item_payloads if item.get("prompt_text")]
+    finally:
+        if owns_session:
+            db.close()
+
+
+def _response_fields_for_assessment(assessment: Assessments, db=None) -> list[str]:
+    """Return ordered item keys for the assessment, used as response identifiers."""
+    owns_session = db is None
+    db = db or SessionLocal()
+    try:
+        item_payloads = get_assessment_item_payloads(db, assessment)
+        return [item["item_key"] for item in item_payloads if item.get("prompt_text")]
+    finally:
+        if owns_session:
+            db.close()
+
+
+def _save_response(assessment_id: int, item_key: str, answer_text: str, question_text: str | None = None) -> bool:
+    """Upsert the given answer into canonical assessment_answers and legacy rows when possible."""
+    ok = save_assessment_answer(
+        assessment_id=assessment_id,
+        item_key=item_key,
+        answer_text=answer_text,
+        question_text=question_text,
+    )
+    if ok:
         logger.info(
-            "Saved response — assessment_id=%s field=%s len=%s",
-            assessment_id, field_name, len(answer_text),
+            "Saved response — assessment_id=%s item_key=%s len=%s",
+            assessment_id, item_key, len(answer_text),
         )
         logger.info(
-            "Saved response preview — assessment_id=%s field=%s text='%s'",
+            "Saved response preview — assessment_id=%s item_key=%s text='%s'",
             assessment_id,
-            field_name,
+            item_key,
             _preview_text(answer_text or ""),
         )
-        return True
-    except Exception as exc:
-        logger.exception("Failed to save response: %s", exc)
-        db.rollback()
-        return False
-    finally:
-        db.close()
+    return ok
 
 
 def _ensure_responses_row(assessment_id: int) -> None:
-    """Ensure a Responses row exists for this assessment_id (creates it if missing)."""
-    db = SessionLocal()
-    try:
-        row = db.query(Responses).filter(Responses.assessment_id == assessment_id).first()
-        if row is None:
-            db.add(Responses(assessment_id=assessment_id))
-            db.commit()
-            logger.info("Created Responses row for assessment_id=%s", assessment_id)
-    except Exception as exc:
-        logger.exception("Failed to ensure Responses row: %s", exc)
-        db.rollback()
-    finally:
-        db.close()
+    """Ensure a compatibility Responses row exists for this assessment_id."""
+    ensure_responses_row_for_assessment(assessment_id)
+    logger.info("Ensured Responses row for assessment_id=%s", assessment_id)
 
 
 def _count_saved_responses(assessment_id: int, response_fields: list[str]) -> int:
-    """
-    Return the number of *leading* consecutive fields that already have a value.
-    Used on reconnect to skip questions already answered.
-    """
-    db = SessionLocal()
-    try:
-        row = db.query(Responses).filter(Responses.assessment_id == assessment_id).first()
-        if not row:
-            return 0
-        finalized_types = {
-            response_type
-            for (response_type,) in (
-                db.query(ResponseSegment.response_type)
-                .filter(ResponseSegment.assessment_id == assessment_id)
-                .distinct()
-                .all()
-            )
-        }
-        count = 0
-        for field in response_fields:
-            val = getattr(row, field, None)
-            response_type = field.replace("_response", "")
-            is_saved = bool(val and isinstance(val, str) and val.strip())
-            if finalized_types:
-                if is_saved and response_type in finalized_types:
-                    count += 1
-                    continue
-                break
-            if is_saved:
-                count += 1
-            else:
-                break
-        return count
-    finally:
-        db.close()
+    """Return the number of leading ordered answers already captured for reconnect flow."""
+    return count_saved_answers(assessment_id, response_fields)
 
 
 def _build_interview_system_instruction(
     questions: list[str],
+    *,
+    assessment_label: str = "Leadership Core",
+    assessment_brief: str | None = None,
     resumed: bool = False,
     candidate_name: str | None = None,
 ) -> str:
@@ -198,13 +138,16 @@ def _build_interview_system_instruction(
 
     clean_name = (candidate_name or "").strip()
     lines = [
-        "You are conducting a structured leadership assessment interview as a professional, warm voice interviewer.",
+        f"You are conducting a structured {assessment_label} assessment interview as a professional, warm voice interviewer.",
         "",
         "Your role: ask the following questions ONE BY ONE, in order. You may rephrase slightly for natural speech, "
         "but the core meaning must remain intact. Wait for the candidate's FULL answer before moving on.",
         "",
         "Rules:",
     ]
+    if assessment_brief:
+        lines.insert(3, assessment_brief)
+        lines.insert(4, "")
 
     if resumed:
         lines.append(
@@ -357,7 +300,6 @@ Rules:
             return client.chat.completions.create(
                 model=MODEL_MINI,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0,
             )
 
         response = await asyncio.to_thread(_call)
@@ -438,6 +380,8 @@ async def agent_websocket(websocket: WebSocket):
     response_fields: list[str] = []   # column names, parallel to `questions`
     questions: list[str] = []
     candidate_name: str | None = None
+    assessment_label = "Leadership Core"
+    assessment_brief: str | None = None
     already_saved = 0                 # questions answered in a previous session
     job_requirements_id: Optional[int] = None
 
@@ -461,8 +405,11 @@ async def agent_websocket(websocket: WebSocket):
                         assessment.user_id,
                     )
                 job_requirements_id = assessment.job_requirements_id
-                questions = _assessment_questions_list(assessment)
-                response_fields = _response_fields_for_assessment(assessment)
+                definition = get_assessment_definition(assessment.assessment_type_code)
+                assessment_label = definition.name
+                assessment_brief = definition.agent_brief
+                questions = _assessment_questions_list(assessment, db)
+                response_fields = _response_fields_for_assessment(assessment, db)
                 logger.info(
                     "[%s] Interview mapping: total_questions=%s response_fields=%s",
                     session_id,
@@ -687,7 +634,8 @@ async def agent_websocket(websocket: WebSocket):
             response_fields[idx],
             len(text),
         )
-        ok = _save_response(assessment_id, response_fields[idx], text)  # type: ignore[arg-type]
+        current_question_text = questions[idx] if idx < len(questions) else None
+        ok = _save_response(assessment_id, response_fields[idx], text, current_question_text)  # type: ignore[arg-type]
         if ok:
             state["last_persisted"] = text
             logger.info("[%s] Persist OK: q=%s field=%s", session_id, idx + 1, response_fields[idx])
@@ -972,7 +920,13 @@ async def agent_websocket(websocket: WebSocket):
             remaining = questions[saved:]
             resumed = saved > 0
             cfg["system_instruction"] = (
-                _build_interview_system_instruction(remaining, resumed=resumed, candidate_name=candidate_name)
+                _build_interview_system_instruction(
+                    remaining,
+                    assessment_label=assessment_label,
+                    assessment_brief=assessment_brief,
+                    resumed=resumed,
+                    candidate_name=candidate_name,
+                )
                 if remaining
                 else DEFAULT_SYSTEM_INSTRUCTION
             )
