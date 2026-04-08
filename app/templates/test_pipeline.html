@@ -571,6 +571,62 @@
   </section>
 
   <script>
+    const ACCESS_TOKEN_KEY = "access_token";
+    (function clearForeignStorageKeys() {
+      const keysToRemove = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith("stayguide_")) keysToRemove.push(key);
+      }
+      keysToRemove.forEach((key) => localStorage.removeItem(key));
+    })();
+
+    function getTokenPayload(token) {
+      try {
+        const payload = token.split(".")[1];
+        return JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function isTokenValid(token) {
+      if (!token) return false;
+      const payload = getTokenPayload(token);
+      if (!payload || !payload.exp) return false;
+      return (payload.exp * 1000) > Date.now();
+    }
+
+    function redirectToLogin() {
+      const next = window.location.pathname + window.location.search;
+      window.location.replace("/auth/login?next=" + encodeURIComponent(next));
+    }
+
+    function getAccessTokenOrRedirect() {
+      const token = localStorage.getItem(ACCESS_TOKEN_KEY);
+      if (!isTokenValid(token)) {
+        localStorage.removeItem(ACCESS_TOKEN_KEY);
+        redirectToLogin();
+        return null;
+      }
+      return token;
+    }
+
+    async function apiFetch(url, options) {
+      const token = getAccessTokenOrRedirect();
+      if (!token) throw new Error("Authentication required.");
+      const reqOptions = options || {};
+      const headers = new Headers(reqOptions.headers || {});
+      headers.set("Authorization", "Bearer " + token);
+      const res = await fetch(url, { ...reqOptions, headers });
+      if (res.status === 401 || res.status === 403) {
+        localStorage.removeItem(ACCESS_TOKEN_KEY);
+        redirectToLogin();
+        throw new Error("Session expired. Redirecting to login...");
+      }
+      return res;
+    }
+
     const state = {
       phase: null,
       jobRequirementsId: null,
@@ -883,7 +939,7 @@
       try {
         const form = new FormData();
         form.append("job_description", desc);
-        const res = await fetch("/job-requirements/analyze", { method: "POST", body: form });
+        const res = await apiFetch("/job-requirements/analyze", { method: "POST", body: form });
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
           throw new Error(err.detail || res.statusText);
@@ -922,7 +978,7 @@
       }
       const form = new FormData();
       form.append("job_description", MBTI_BOOTSTRAP_JOB_DESCRIPTION);
-      const res = await fetch("/job-requirements/analyze", { method: "POST", body: form });
+      const res = await apiFetch("/job-requirements/analyze", { method: "POST", body: form });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || res.statusText);
@@ -959,7 +1015,7 @@
             ? "Unable to prepare the MBTI assessment context."
             : "Fill in both Job Requirements ID and User ID.");
         }
-        const res = await fetch("/assessments/generate", {
+        const res = await apiFetch("/assessments/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ job_requirements_id: jobReqId, user_id: userId, assessment_type_code: assessmentTypeCode }),
@@ -1008,7 +1064,7 @@
       try {
         // Trigger final analysis once. The backend now waits for any in-flight
         // segment/signal extraction work rather than rebuilding everything.
-        const rerunRes = await fetch("/intelligence/assessment/" + assessmentId + "/rerun", {
+        const rerunRes = await apiFetch("/intelligence/assessment/" + assessmentId + "/rerun", {
           method: "POST",
         });
         if (!rerunRes.ok) {
@@ -1018,7 +1074,7 @@
 
         let pred = null;
         for (let i = 0; i < 90; i++) {
-          const statusRes = await fetch("/intelligence/assessment/" + assessmentId + "/status");
+          const statusRes = await apiFetch("/intelligence/assessment/" + assessmentId + "/status");
           if (statusRes.ok) {
             const status = await statusRes.json();
             if (status.pending_signal_tasks > 0) {
@@ -1029,7 +1085,7 @@
               showStatus("phase4", "loading", "Preparing analysis…");
             }
             if (status.prediction_ready) {
-              const pRes = await fetch("/intelligence/assessment/" + assessmentId + "/predictions");
+              const pRes = await apiFetch("/intelligence/assessment/" + assessmentId + "/predictions");
               if (pRes.ok) {
                 const data = await pRes.json();
                 if (data && data.fit_score !== null && data.confidence_score !== null) {
@@ -1042,7 +1098,7 @@
           await new Promise(resolve => setTimeout(resolve, 1000));
         }
 
-        const aRes = await fetch("/intelligence/assessment/" + assessmentId + "/analysis");
+        const aRes = await apiFetch("/intelligence/assessment/" + assessmentId + "/analysis");
         if (!aRes.ok) {
           const err = await aRes.json().catch(() => ({}));
           throw new Error(err.detail || aRes.statusText);
@@ -1139,6 +1195,7 @@
     }
 
     (function init() {
+      if (!getAccessTokenOrRedirect()) return;
       const params = new URLSearchParams(window.location.search);
       const code = params.get("assessment");
       if (code && ASSESSMENT_CONFIGS[code]) {

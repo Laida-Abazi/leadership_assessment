@@ -107,10 +107,53 @@
   </main>
   <script>
     (function () {
+      const ACCESS_TOKEN_KEY = "access_token";
+      (function clearForeignStorageKeys() {
+        const keysToRemove = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key && key.startsWith("stayguide_")) keysToRemove.push(key);
+        }
+        keysToRemove.forEach((key) => localStorage.removeItem(key));
+      })();
       const statusEl = document.getElementById("status");
       const btn = document.getElementById("btn");
       const subEl = document.getElementById("sub");
       const hintEl = document.getElementById("hint");
+
+      function getTokenPayload(token) {
+        try {
+          const payload = token.split(".")[1];
+          return JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
+        } catch (_) {
+          return null;
+        }
+      }
+
+      function isTokenValid(token) {
+        if (!token) return false;
+        const payload = getTokenPayload(token);
+        if (!payload || !payload.exp) return false;
+        return (payload.exp * 1000) > Date.now();
+      }
+
+      function redirectToLogin() {
+        const next = window.location.pathname + window.location.search;
+        window.location.replace("/auth/login?next=" + encodeURIComponent(next));
+      }
+
+      function getAccessTokenOrRedirect() {
+        const token = localStorage.getItem(ACCESS_TOKEN_KEY);
+        if (!isTokenValid(token)) {
+          localStorage.removeItem(ACCESS_TOKEN_KEY);
+          redirectToLogin();
+          return null;
+        }
+        return token;
+      }
+
+      const currentToken = getAccessTokenOrRedirect();
+      if (!currentToken) return;
 
       const assessmentId = (function () {
         const params = new URLSearchParams(location.search);
@@ -265,10 +308,13 @@
       }
 
       function connect(options) {
+        const token = getAccessTokenOrRedirect();
+        if (!token) return;
         const isReconnect = !!(options && options.isReconnect);
         const protocol = location.protocol === "https:" ? "wss:" : "ws:";
         let url = protocol + "//" + location.host + "/agent/ws";
         if (assessmentId != null) url += "?assessment_id=" + assessmentId;
+        url += (url.includes("?") ? "&" : "?") + "access_token=" + encodeURIComponent(token);
         clearReconnectTimer();
         setStatus("connecting", isReconnect ? "Reconnecting interview..." : "Connecting…");
         ws = new WebSocket(url);
@@ -299,6 +345,11 @@
               } else if (msg.gemini_disconnected) {
                 setStatus("connecting", "Session interrupted, reconnecting\u2026");
               } else if (msg.error) {
+                if ((msg.error || "").toLowerCase().includes("auth")) {
+                  localStorage.removeItem(ACCESS_TOKEN_KEY);
+                  redirectToLogin();
+                  return;
+                }
                 setStatus("error", msg.error);
                 setConnected(false);
               } else if (msg.interrupted) {

@@ -16,6 +16,7 @@ import websockets.exceptions
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
+from app.auth.login.service import decode_access_token
 from app.as_requirements.config.models_setup import MODEL_MINI, get_openai_client
 from app.db import SessionLocal
 from app.db.models import Assessments, ResponseSegment, User
@@ -349,6 +350,25 @@ async def agent_websocket(websocket: WebSocket):
     Client → server : raw 16-bit PCM, 16 kHz, mono (no header)
     Server → client : raw 16-bit PCM, 24 kHz, mono (no header)
     """
+    token = websocket.query_params.get("access_token")
+    if not token:
+        await websocket.close(code=1008, reason="Authentication required.")
+        return
+
+    db_auth = SessionLocal()
+    try:
+        try:
+            user_id = decode_access_token(token)
+        except Exception:
+            await websocket.close(code=1008, reason="Invalid or expired session.")
+            return
+        user = db_auth.get(User, user_id)
+        if not user or not user.is_verified:
+            await websocket.close(code=1008, reason="Authentication required.")
+            return
+    finally:
+        db_auth.close()
+
     session_id = uuid.uuid4().hex[:10]
     client_host = None
     try:

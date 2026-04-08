@@ -10,7 +10,7 @@ if _ROOT not in (Path(p).resolve() for p in sys.path):
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.responses import FileResponse, HTMLResponse
 
 import uvicorn
@@ -26,7 +26,8 @@ logging.basicConfig(
 from app.as_requirements.routes.ai_analysis import router as job_requirements_router
 from app.as_blueprinting.routes.assessment import router as assessments_router
 from app.as_analysis.routes.analysis import router as analysis_router
-from app.auth.register import router as auth_router
+from app.auth.router import router as auth_router
+from app.auth.login.deps import require_authenticated_user
 from app.agent.routes import router as agent_router
 from app.db import SessionLocal
 from app.routers.intelligence import router as intelligence_router
@@ -57,12 +58,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.include_router(job_requirements_router)
-app.include_router(assessments_router)
-app.include_router(analysis_router)
 app.include_router(auth_router)
-app.include_router(agent_router)
-app.include_router(intelligence_router)
+protected_dependencies = [Depends(require_authenticated_user)]
+app.include_router(job_requirements_router, dependencies=protected_dependencies)
+app.include_router(assessments_router, dependencies=protected_dependencies)
+app.include_router(analysis_router, dependencies=protected_dependencies)
+app.include_router(agent_router, dependencies=protected_dependencies)
+app.include_router(intelligence_router, dependencies=protected_dependencies)
 
 
 
@@ -75,6 +77,22 @@ def health():
 def serve_test_pipeline():
     """Serve the end-to-end pipeline test UI."""
     path = Path(__file__).resolve().parent / "templates" / "test_pipeline.html"
+    content = path.read_text(encoding="utf-8")
+    return HTMLResponse(content, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/auth/login")
+def serve_login_page():
+    """Serve the login UI."""
+    path = Path(__file__).resolve().parent / "templates" / "auth_login.html"
+    content = path.read_text(encoding="utf-8")
+    return HTMLResponse(content, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/auth/signup")
+def serve_signup_page():
+    """Serve the signup UI."""
+    path = Path(__file__).resolve().parent / "templates" / "auth_signup.html"
     content = path.read_text(encoding="utf-8")
     return HTMLResponse(content, headers={"Cache-Control": "no-store"})
 

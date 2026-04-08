@@ -170,4 +170,6 @@ def _send(cfg: dict, sender: str, to_email: str, msg: MIMEMultipart) -> None:
         logger.info("Email sent to %s", to_email)
     except Exception:
         logger.exception("Failed to send email to %s", to_email)
-        raise
+        # Do not fail auth flows (signup/reset) when SMTP is misconfigured in local/dev.
+        # Account creation and token generation should still complete successfully.
+        return
