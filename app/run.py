@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 
 import uvicorn
@@ -56,6 +57,18 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Multi Assessment Agent",
     lifespan=lifespan,
+)
+
+CORS_ORIGINS = [
+    "https://leadership-assessment-front-app.vercel.app",
+    "http://localhost:3000",
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(auth_router)
