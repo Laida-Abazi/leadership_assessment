@@ -19,12 +19,26 @@
     .ok { color:var(--ok); }
     .foot { margin-top:1rem; font-size:.9rem; color:var(--muted); }
     a { color:var(--accent); text-decoration:none; }
+    .tester-hint { margin:0 0 1rem; padding:.85rem 1rem; border-radius:10px; border:1px dashed var(--border); background:rgba(124,156,255,.08); font-size:.85rem; }
+    .tester-hint strong { display:block; margin-bottom:.5rem; color:var(--muted); font-size:.75rem; text-transform:uppercase; letter-spacing:.04em; }
+    .tester-hint dl { margin:0; display:grid; gap:.35rem; }
+    .tester-hint dt { margin:0; color:var(--muted); font-size:.8rem; }
+    .tester-hint dd { margin:0; font-family:ui-monospace,Consolas,monospace; font-size:.9rem; color:var(--text); word-break:break-all; }
   </style>
 </head>
 <body>
   <main>
     <h1>Login</h1>
     <p>Sign in to continue to the app.</p>
+    <div class="tester-hint" aria-label="Test account for QA">
+      <strong>For testers</strong>
+      <dl>
+        <dt>Email</dt>
+        <dd>usertest@example.com</dd>
+        <dt>Password</dt>
+        <dd>Testing00</dd>
+      </dl>
+    </div>
     <form id="loginForm" autocomplete="off">
       <label for="email">Email</label>
       <input id="email" type="email" required autocomplete="off">
