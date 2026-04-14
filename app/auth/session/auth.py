@@ -4,7 +4,6 @@ Never trust JWT alone — get_current_session always validates the session in th
 """
 import logging
 import os
-import secrets
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Annotated
@@ -22,7 +21,10 @@ from models.user import User
 
 logger = logging.getLogger(__name__)
 
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", secrets.token_urlsafe(64))
+JWT_SECRET_ENV_KEY = "JWT_SECRET_KEY"
+# Stable fallback avoids invalidating tokens on server reload when env is missing.
+DEFAULT_DEV_SECRET = "leadership-assessment-dev-jwt-secret-change-me"
+SECRET_KEY = os.getenv(JWT_SECRET_ENV_KEY, DEFAULT_DEV_SECRET)
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 

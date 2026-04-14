@@ -1,7 +1,7 @@
 import os
 
-from fastapi import Depends, HTTPException, Request, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import Depends, HTTPException, status
+from starlette.requests import HTTPConnection
 from sqlalchemy.orm import Session
 
 from app.auth.login.service import decode_access_token
@@ -9,19 +9,20 @@ from app.db import get_db
 from app.db.models import User
 
 ACCESS_TOKEN_COOKIE_NAME = os.getenv("ACCESS_TOKEN_COOKIE_NAME", "access_token")
-security = HTTPBearer(auto_error=False)
 
 
 def get_current_user_id(
-    request: Request,
-    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+    connection: HTTPConnection,
 ) -> int:
-    """Extract auth token from Authorization header first, then cookie fallback."""
+    """Extract auth token from header first, then cookie fallback."""
     token = None
-    if credentials and credentials.scheme.lower() == "bearer":
-        token = credentials.credentials
+    authorization = connection.headers.get("authorization")
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
     if not token:
-        token = request.cookies.get(ACCESS_TOKEN_COOKIE_NAME)
+        token = connection.cookies.get(ACCESS_TOKEN_COOKIE_NAME)
+    if not token:
+        token = connection.query_params.get("access_token")
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

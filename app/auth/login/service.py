@@ -1,5 +1,4 @@
 import os
-import secrets
 from datetime import datetime, timezone, timedelta
 
 from fastapi import HTTPException, status
@@ -10,7 +9,10 @@ from sqlalchemy.orm import Session
 from app.auth.signup.service import verify_password
 from app.db.models import User
 
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", secrets.token_urlsafe(64))
+JWT_SECRET_ENV_KEY = "JWT_SECRET_KEY"
+# Stable fallback avoids invalidating tokens on server reload when env is missing.
+DEFAULT_DEV_SECRET = "leadership-assessment-dev-jwt-secret-change-me"
+SECRET_KEY = os.getenv(JWT_SECRET_ENV_KEY, DEFAULT_DEV_SECRET)
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 3600
 REFRESH_TOKEN_EXPIRE_DAYS = 7
