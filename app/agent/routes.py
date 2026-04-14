@@ -334,6 +334,41 @@ def serve_test_agent_page():
     return FileResponse(path)
 
 
+@router.get(
+    "/ws/docs",
+    summary="WebSocket integration guide",
+    description=(
+        "OpenAPI/Swagger does not natively include websocket routes. "
+        "Use this endpoint to view connection details for /agent/ws."
+    ),
+)
+def agent_websocket_docs():
+    """Swagger-visible docs for the /agent/ws websocket endpoint."""
+    return {
+        "websocket_path": "/agent/ws",
+        "local_url_example": "ws://localhost:8000/agent/ws?access_token=<JWT>",
+        "production_url_pattern": "wss://<your-domain>/agent/ws?access_token=<JWT>",
+        "optional_query_params": {
+            "assessment_id": "int - run structured interview flow and persist answers"
+        },
+        "auth": (
+            "Required query param: access_token. "
+            "Missing/invalid/expired/unverified sessions are rejected (close code 1008)."
+        ),
+        "message_contract": {
+            "client_to_server": [
+                "Binary frames: raw PCM audio, 16-bit mono, 16kHz",
+                "Text frames: JSON control/events",
+            ],
+            "server_to_client": [
+                "Binary frames: raw PCM audio, 16-bit mono, 24kHz",
+                "Text frames: JSON status/events (status, warning, error, interrupted, answers_saved)",
+            ],
+        },
+        "note": "/agent/test is local HTML test UI only.",
+    }
+
+
 @router.websocket("/ws")
 async def agent_websocket(websocket: WebSocket):
     """

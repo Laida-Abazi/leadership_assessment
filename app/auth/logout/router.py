@@ -1,12 +1,11 @@
-import uuid
+from fastapi import APIRouter, Depends, Response
+from sqlalchemy.orm import Session
 
-from fastapi import APIRouter, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from db.database import get_db
-from login.deps import get_current_user_id
-from logout.schemas import LogoutResponse
-from logout.service import logout_user
+from app.auth.login.deps import ACCESS_TOKEN_COOKIE_NAME, require_authenticated_user
+from app.auth.logout.schemas import LogoutResponse
+from app.auth.logout.service import logout_user
+from app.db import get_db
+from app.db.models import User
 
 router = APIRouter()
 
@@ -17,9 +16,10 @@ router = APIRouter()
     summary="Log out and invalidate refresh token",
 )
 async def logout(
-    user_id: uuid.UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
+    response: Response,
+    user: User = Depends(require_authenticated_user),
+    db: Session = Depends(get_db),
 ):
-    await logout_user(db, user_id)
-    await db.commit()
+    logout_user(db, user.id)
+    response.delete_cookie(key=ACCESS_TOKEN_COOKIE_NAME, path="/")
     return LogoutResponse()

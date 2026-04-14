@@ -60,3 +60,42 @@ Requirements and assessment questions are stored as embeddings so the agent can 
    PYTHONPATH=. python app/scripts/test_rag.py --assessment-id 1 --query "Tell me about leadership"
    PYTHONPATH=. python app/scripts/test_rag.py --assessment-id 1 --reindex
    ```
+
+---
+
+## Agent WebSocket API (for frontend integration)
+
+Use this endpoint for custom frontend UI integrations:
+
+- **WebSocket URL**: `ws://localhost:8000/agent/ws`
+- **Production URL pattern**: `wss://<your-domain>/agent/ws`
+
+### Authentication
+
+Pass a valid access token as a query parameter:
+
+`/agent/ws?access_token=<JWT>`
+
+If the token is missing, invalid, expired, or not verified, the socket is closed with policy violation (`1008`).
+
+### Optional query params
+
+- `assessment_id` (int): when set, the agent runs the structured interview flow and saves answers.
+
+Example:
+
+`/agent/ws?access_token=<JWT>&assessment_id=123`
+
+### Message contract
+
+- **Client -> server**
+  - Binary frames: raw PCM audio (16-bit, mono, 16kHz).
+  - Text frames (JSON): control/events from client UI.
+- **Server -> client**
+  - Binary frames: raw PCM audio (16-bit, mono, 24kHz).
+  - Text frames (JSON): status/events (for example `status`, `warning`, `error`, `interrupted`, `answers_saved`).
+
+### Local test UI
+
+`/agent/test` serves the built-in local HTML test page.  
+It is intended only for local testing, not for third-party frontend integration.

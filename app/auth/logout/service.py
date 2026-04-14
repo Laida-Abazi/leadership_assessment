@@ -1,16 +1,11 @@
-import uuid
-
-from sqlalchemy import update
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from models.user import User
+from sqlalchemy.orm import Session
 
 
-async def logout_user(db: AsyncSession, user_id: uuid.UUID) -> None:
-    """Invalidate the current session by clearing the user's refresh token."""
-    await db.execute(
-        update(User)
-        .where(User.id == user_id)
-        .values(refresh_token=None, refresh_token_expires=None)
-    )
-    await db.flush()
+def logout_user(db: Session, user_id: int) -> None:
+    """
+    Perform server-side logout cleanup for a user.
+
+    This app currently uses stateless JWT access tokens, so logout is primarily
+    implemented by the client clearing storage and the server clearing auth cookies.
+    """
+    _ = (db, user_id)
