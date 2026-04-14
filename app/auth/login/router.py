@@ -1,8 +1,13 @@
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.orm import Session
 
+from app.auth.login.deps import ACCESS_TOKEN_COOKIE_NAME
 from app.auth.login.schemas import LoginRequest, LoginResponse, TokenPayload, UserBrief
-from app.auth.login.service import authenticate_user, create_access_token
+from app.auth.login.service import (
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+    authenticate_user,
+    create_access_token,
+)
 from app.db import get_db
 
 router = APIRouter()
@@ -16,12 +21,22 @@ router = APIRouter()
 async def login(
     payload: LoginRequest,
     request: Request,
+    response: Response,
     db: Session = Depends(get_db),
 ):
     user = authenticate_user(
         db, payload.email, payload.password, request.client.host if request.client else None
     )
     token = create_access_token(user)
+    response.set_cookie(
+        key=ACCESS_TOKEN_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        secure=(request.url.scheme == "https"),
+        samesite="lax",
+        path="/",
+    )
     return LoginResponse(
         token=TokenPayload(token=token),
         user=UserBrief(id=user.id, email=user.email, name=user.name, surname=user.surname),
