@@ -392,6 +392,7 @@ async def agent_websocket(websocket: WebSocket):
 
     db_auth = SessionLocal()
     try:
+        
         try:
             user_id = decode_access_token(token)
         except Exception:

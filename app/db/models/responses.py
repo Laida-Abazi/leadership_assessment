@@ -1,6 +1,7 @@
-from sqlalchemy import Column, Integer, ForeignKey, Text
+from sqlalchemy import Column, Integer, ForeignKey, Text, DateTime
 from sqlalchemy.orm import relationship
 from app.db.index import Base
+from sqlalchemy.sql import func
 
 
 class Responses(Base):
@@ -18,6 +19,7 @@ class Responses(Base):
     structured_reference_response = Column(Text, nullable=True)
     culture_alignment_response = Column(Text, nullable=True)
     integrity_ethics_response = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     assessment = relationship("Assessments", back_populates="responses")
     analyses = relationship("Analysis", back_populates="responses")

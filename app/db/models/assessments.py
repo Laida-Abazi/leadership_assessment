@@ -1,7 +1,8 @@
-from sqlalchemy import Column, Integer, ForeignKey, Text, String
+from sqlalchemy import Column, Integer, ForeignKey, Text, String, DateTime
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from app.db.index import Base
+from sqlalchemy.sql import func
 
 
 class Assessments(Base):
@@ -23,6 +24,7 @@ class Assessments(Base):
     structured_reference_question = Column(Text, nullable=True)
     culture_alignment_question = Column(Text, nullable=True)
     integrity_ethics_question = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User", back_populates="assessments")
     job_requirements = relationship("JobRequirements", back_populates="assessments")

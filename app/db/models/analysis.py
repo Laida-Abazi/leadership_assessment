@@ -1,7 +1,9 @@
-from sqlalchemy import Column, Integer, ForeignKey, Text
+from sqlalchemy import Column, Integer, ForeignKey, Text, DateTime
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from app.db.index import Base
+from sqlalchemy.sql import func
+
 
 
 class Analysis(Base):
@@ -20,6 +22,7 @@ class Analysis(Base):
     trait_gaps          = Column(JSONB, nullable=True)
     contradictions      = Column(JSONB, nullable=True)
     behavioral_patterns = Column(JSONB, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     job_requirements = relationship("JobRequirements", back_populates="analyses")
     assessment = relationship("Assessments", back_populates="analyses")

@@ -25,6 +25,7 @@ class JobRequirements(Base):
     work_authorization = Column(Text, nullable=True)
     seniority_level = Column(Text, nullable=True)
     culture_fit = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     assessments          = relationship("Assessments", back_populates="job_requirements")
     analyses             = relationship("Analysis", back_populates="job_requirements")
