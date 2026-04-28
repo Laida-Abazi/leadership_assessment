@@ -86,38 +86,7 @@ def get_signals(assessment_id: int, db: Session = Depends(get_db)) -> dict[str, 
 @router.get("/assessment/{assessment_id}/analysis")
 def get_analysis(assessment_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
     """Return the full Analysis row including all JSONB intelligence fields."""
-    _require_assessment(db, assessment_id)
-    row = (
-        db.query(Analysis)
-        .filter(Analysis.assessment_id == assessment_id)
-        .first()
-    )
-    if not row:
-        raise HTTPException(status_code=404, detail="Analysis not found for this assessment.")
-    return {
-        "id": row.id,
-        "assessment_id": row.assessment_id,
-        "job_requirements_id": row.job_requirements_id,
-        "assessment_type_code": row.assessment.assessment_type_code if row.assessment else None,
-        "analysis_text": row.analysis,
-        "aggregated_traits": row.aggregated_traits,
-        "consistency_scores": row.consistency_scores,
-        "trait_gaps": row.trait_gaps,
-        "contradictions": row.contradictions,
-        "behavioral_patterns": row.behavioral_patterns,
-        "assessment_result": (
-            {
-                "shared_result": result.shared_result_json,
-                "type_result": result.type_result_json,
-                "narrative": result.narrative,
-                "fit_score": result.fit_score,
-                "confidence_score": result.confidence_score,
-                "risk_flags": result.risk_flags,
-            }
-            if (result := db.query(AssessmentResult).filter(AssessmentResult.assessment_id == assessment_id).first())
-            else None
-        ),
-    }
+    return build_analysis_response(db, assessment_id)
 
 
 # ---------------------------------------------------------------------------
@@ -127,35 +96,7 @@ def get_analysis(assessment_id: int, db: Session = Depends(get_db)) -> dict[str,
 @router.get("/assessment/{assessment_id}/predictions")
 def get_predictions(assessment_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
     """Return the Predictions row including fit_score, risk_flags, and hiring_recommendation."""
-    _require_assessment(db, assessment_id)
-    analysis = (
-        db.query(Analysis)
-        .filter(Analysis.assessment_id == assessment_id)
-        .first()
-    )
-    if not analysis:
-        raise HTTPException(status_code=404, detail="No analysis found for this assessment.")
-    pred = (
-        db.query(Predictions)
-        .filter(Predictions.analysis_id == analysis.id)
-        .first()
-    )
-    if not pred:
-        raise HTTPException(status_code=404, detail="No predictions found for this assessment.")
-    return {
-        "id": pred.id,
-        "analysis_id": pred.analysis_id,
-        "assessment_type_code": analysis.assessment.assessment_type_code if analysis.assessment else None,
-        "hiring_recommendation": pred.prediction,
-        "fit_score": pred.fit_score,
-        "confidence_score": pred.confidence_score,
-        "risk_flags": pred.risk_flags,
-        "type_result": (
-            result.type_result_json
-            if (result := db.query(AssessmentResult).filter(AssessmentResult.assessment_id == assessment_id).first())
-            else None
-        ),
-    }
+    return build_predictions_response(db, assessment_id)
 
 
 @router.get("/assessment/{assessment_id}/status")
@@ -164,10 +105,7 @@ def get_intelligence_processing_status(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """Return whether signal extraction / analysis is still running."""
-    _require_assessment(db, assessment_id)
-    from app.services.intelligence import get_intelligence_status
-
-    return get_intelligence_status(assessment_id)
+    return build_status_response(db, assessment_id)
 
 
 # ---------------------------------------------------------------------------
@@ -227,3 +165,77 @@ def _require_assessment(db: Session, assessment_id: int) -> Assessments:
     if not assessment:
         raise HTTPException(status_code=404, detail=f"Assessment {assessment_id} not found.")
     return assessment
+
+
+def build_status_response(db: Session, assessment_id: int) -> dict[str, Any]:
+    _require_assessment(db, assessment_id)
+    from app.services.intelligence import get_intelligence_status
+
+    return get_intelligence_status(assessment_id)
+
+
+def build_analysis_response(db: Session, assessment_id: int) -> dict[str, Any]:
+    _require_assessment(db, assessment_id)
+    row = (
+        db.query(Analysis)
+        .filter(Analysis.assessment_id == assessment_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Analysis not found for this assessment.")
+    return {
+        "id": row.id,
+        "assessment_id": row.assessment_id,
+        "job_requirements_id": row.job_requirements_id,
+        "assessment_type_code": row.assessment.assessment_type_code if row.assessment else None,
+        "analysis_text": row.analysis,
+        "aggregated_traits": row.aggregated_traits,
+        "consistency_scores": row.consistency_scores,
+        "trait_gaps": row.trait_gaps,
+        "contradictions": row.contradictions,
+        "behavioral_patterns": row.behavioral_patterns,
+        "assessment_result": (
+            {
+                "shared_result": result.shared_result_json,
+                "type_result": result.type_result_json,
+                "narrative": result.narrative,
+                "fit_score": result.fit_score,
+                "confidence_score": result.confidence_score,
+                "risk_flags": result.risk_flags,
+            }
+            if (result := db.query(AssessmentResult).filter(AssessmentResult.assessment_id == assessment_id).first())
+            else None
+        ),
+    }
+
+
+def build_predictions_response(db: Session, assessment_id: int) -> dict[str, Any]:
+    _require_assessment(db, assessment_id)
+    analysis = (
+        db.query(Analysis)
+        .filter(Analysis.assessment_id == assessment_id)
+        .first()
+    )
+    if not analysis:
+        raise HTTPException(status_code=404, detail="No analysis found for this assessment.")
+    pred = (
+        db.query(Predictions)
+        .filter(Predictions.analysis_id == analysis.id)
+        .first()
+    )
+    if not pred:
+        raise HTTPException(status_code=404, detail="No predictions found for this assessment.")
+    return {
+        "id": pred.id,
+        "analysis_id": pred.analysis_id,
+        "assessment_type_code": analysis.assessment.assessment_type_code if analysis.assessment else None,
+        "hiring_recommendation": pred.prediction,
+        "fit_score": pred.fit_score,
+        "confidence_score": pred.confidence_score,
+        "risk_flags": pred.risk_flags,
+        "type_result": (
+            result.type_result_json
+            if (result := db.query(AssessmentResult).filter(AssessmentResult.assessment_id == assessment_id).first())
+            else None
+        ),
+    }

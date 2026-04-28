@@ -14,6 +14,7 @@ import os
 import statistics
 import time
 from collections import Counter, defaultdict
+from datetime import datetime, timezone
 from typing import Any
 
 import openai
@@ -37,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 _PENDING_SIGNAL_TASKS: dict[int, set[asyncio.Task]] = defaultdict(set)
 _ANALYSIS_TASKS: dict[int, asyncio.Task] = {}
+_ANALYSIS_STATE: dict[int, dict[str, Any]] = {}
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -50,6 +52,36 @@ INTELLIGENCE_MODEL = "gpt-5.2-pro"
 REASONING_EFFORT_SIGNAL = "high"
 REASONING_EFFORT_NARRATIVE = "high"
 REASONING_EFFORT_JOB_PROFILE = "high"
+FINAL_ANALYSIS_RETRY_ATTEMPTS = int(os.getenv("FINAL_ANALYSIS_RETRY_ATTEMPTS", "1"))
+FINAL_ANALYSIS_RETRY_DELAY_SECONDS = float(os.getenv("FINAL_ANALYSIS_RETRY_DELAY_SECONDS", "5"))
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _set_analysis_state(
+    assessment_id: int,
+    status: str,
+    *,
+    attempts: int | None = None,
+    error: str | None = None,
+) -> None:
+    state = dict(_ANALYSIS_STATE.get(assessment_id, {}))
+    state["status"] = status
+    state["updated_at"] = _utcnow_iso()
+    if attempts is not None:
+        state["attempts"] = attempts
+    if status == "running" and not state.get("started_at"):
+        state["started_at"] = state["updated_at"]
+    if status == "completed":
+        state["completed_at"] = state["updated_at"]
+        state["last_error"] = None
+    elif error is not None:
+        state["last_error"] = error
+    elif status in {"pending", "running"}:
+        state["last_error"] = None
+    _ANALYSIS_STATE[assessment_id] = state
 
 # Role-fit recommendation thresholds (tune as needed).
 ROLE_READY_MIN_FIT = 0.80
@@ -127,15 +159,34 @@ def get_intelligence_status(assessment_id: int) -> dict[str, Any]:
         for task in _PENDING_SIGNAL_TASKS.get(assessment_id, set())
         if not task.done()
     ]
+    state = dict(_ANALYSIS_STATE.get(assessment_id, {}))
+    status_value = state.get("status")
+    if not status_value:
+        if analysis_task and not analysis_task.done():
+            status_value = "pending" if pending_signal_tasks else "running"
+        elif prediction is not None or analysis is not None:
+            status_value = "completed"
+        elif pending_signal_tasks or segment_count > 0:
+            status_value = "pending"
+        else:
+            status_value = "pending"
+
     return {
         "assessment_id": assessment_id,
+        "status": status_value,
         "pending_signal_tasks": len(pending_signal_tasks),
         "segment_count": segment_count,
         "signal_count": signal_count,
         "signals_ready": segment_count == 0 or signal_count >= segment_count,
-        "analysis_running": bool(analysis_task and not analysis_task.done()),
+        "analysis_running": status_value == "running",
         "analysis_ready": analysis is not None,
         "prediction_ready": prediction is not None,
+        "failed": status_value == "failed",
+        "attempts": state.get("attempts", 0),
+        "started_at": state.get("started_at"),
+        "completed_at": state.get("completed_at"),
+        "updated_at": state.get("updated_at"),
+        "last_error": state.get("last_error"),
     }
 
 
@@ -174,6 +225,8 @@ def schedule_final_analysis(
     job_requirements_id: int,
     *,
     max_wait_seconds: int = 60,
+    retry_attempts: int = FINAL_ANALYSIS_RETRY_ATTEMPTS,
+    retry_delay_seconds: float = FINAL_ANALYSIS_RETRY_DELAY_SECONDS,
 ) -> bool:
     """
     Schedule exactly one final-analysis background task for an assessment.
@@ -185,24 +238,49 @@ def schedule_final_analysis(
     if existing and not existing.done():
         return False
 
+    _set_analysis_state(assessment_id, "pending", attempts=0)
+
     async def _runner() -> None:
+        attempt = 0
         try:
-            await _await_registered_signal_tasks(
-                assessment_id,
-                max_wait_seconds=max_wait_seconds,
-            )
-            await run_full_analysis_chained(
-                assessment_id=assessment_id,
-                job_requirements_id=job_requirements_id,
-                rebuild_from_responses=False,
-                max_wait_seconds=max_wait_seconds,
-            )
-        except Exception as exc:
-            logger.exception(
-                "[intelligence] schedule_final_analysis failed for assessment_id=%s: %s",
-                assessment_id,
-                exc,
-            )
+            while True:
+                attempt += 1
+                try:
+                    logger.info(
+                        "[intelligence] final analysis scheduled: assessment_id=%s attempt=%s",
+                        assessment_id,
+                        attempt,
+                    )
+                    _set_analysis_state(assessment_id, "pending", attempts=attempt)
+                    await _await_registered_signal_tasks(
+                        assessment_id,
+                        max_wait_seconds=max_wait_seconds,
+                    )
+                    _set_analysis_state(assessment_id, "running", attempts=attempt)
+                    await run_full_analysis_chained(
+                        assessment_id=assessment_id,
+                        job_requirements_id=job_requirements_id,
+                        rebuild_from_responses=False,
+                        max_wait_seconds=max_wait_seconds,
+                    )
+                    logger.info(
+                        "[intelligence] final analysis completed: assessment_id=%s attempt=%s",
+                        assessment_id,
+                        attempt,
+                    )
+                    _set_analysis_state(assessment_id, "completed", attempts=attempt)
+                    return
+                except Exception as exc:
+                    logger.exception(
+                        "[intelligence] schedule_final_analysis failed for assessment_id=%s: %s",
+                        assessment_id,
+                        exc,
+                    )
+                    if attempt > retry_attempts:
+                        _set_analysis_state(assessment_id, "failed", attempts=attempt, error=str(exc))
+                        return
+                    _set_analysis_state(assessment_id, "pending", attempts=attempt, error=str(exc))
+                    await asyncio.sleep(retry_delay_seconds)
         finally:
             _ANALYSIS_TASKS.pop(assessment_id, None)
 
@@ -868,6 +946,7 @@ async def run_full_analysis(assessment_id: int, job_requirements_id: int) -> Non
     except Exception as exc:
         logger.exception("[intelligence] run_full_analysis FAILED (persist): %s", exc)
         db.rollback()
+        raise
     finally:
         db.close()
 

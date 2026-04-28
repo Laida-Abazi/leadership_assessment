@@ -1,7 +1,8 @@
-from sqlalchemy import Column, Integer, ForeignKey, Text, Float
+from sqlalchemy import Column, Integer, ForeignKey, Text, Float, DateTime
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from app.db.index import Base
+from sqlalchemy.sql import func
 
 
 class Predictions(Base):
@@ -15,5 +16,6 @@ class Predictions(Base):
     fit_score        = Column(Float, nullable=True)
     confidence_score = Column(Float, nullable=True)
     risk_flags       = Column(JSONB, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     analysis = relationship("Analysis", back_populates="predictions")

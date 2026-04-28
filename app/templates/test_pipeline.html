@@ -220,6 +220,19 @@
     }
     .form-row > div { flex: 1; }
     .form-group { margin-bottom: 1rem; }
+    .source-meta {
+      margin-bottom: 1rem;
+      padding: 0.9rem 1rem;
+      background: rgba(124,156,255,0.08);
+      border: 1px solid rgba(124,156,255,0.18);
+      border-radius: 10px;
+      font-size: 0.85rem;
+      line-height: 1.6;
+      color: var(--text);
+      display: none;
+    }
+    .source-meta.visible { display: block; }
+    .source-meta strong { color: var(--accent); }
 
     /* ── Buttons ── */
     .btn-row {
@@ -397,7 +410,7 @@
     .interview-link {
       display: flex;
       flex-direction: column;
-      align-items: center;
+      align-items: stretch;
       gap: 1rem;
       padding: 1.5rem;
       background: var(--surface-alt);
@@ -415,7 +428,20 @@
       font-size: 0.8rem;
       color: var(--muted);
       line-height: 1.5;
-      text-align: center;
+      text-align: left;
+    }
+    .interview-link .meta {
+      font-size: 0.82rem;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .link-actions {
+      display: flex;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+    }
+    .link-field {
+      width: 100%;
     }
     @media (max-width: 720px) {
       .assessment-grid {
@@ -464,10 +490,24 @@
     <!-- Phase 1: Job Requirements Analysis -->
     <div class="card visible" id="phase1">
       <h2 id="phase1Title">Job Requirements Analysis</h2>
-      <p class="desc" id="phase1Desc">Paste a job description below. The system will extract structured requirements using GPT.</p>
+      <p class="desc" id="phase1Desc">Paste a job description or provide a LinkedIn job posting URL. The system will extract structured requirements using GPT.</p>
       <div class="form-group">
+        <label for="requirementSource">Source</label>
+        <select id="requirementSource" onchange="toggleRequirementInputSource()">
+          <option value="description">Paste job description</option>
+          <option value="linkedin">LinkedIn job posting URL</option>
+        </select>
+      </div>
+      <div class="form-group" id="jobDescGroup">
         <label for="jobDesc">Job Description</label>
         <textarea id="jobDesc" placeholder="Paste the full job description here..."></textarea>
+      </div>
+      <div class="form-group" id="linkedinUrlGroup" style="display:none;">
+        <label for="linkedinJobUrl">LinkedIn Job Posting URL</label>
+        <input id="linkedinJobUrl" type="text" placeholder="https://www.linkedin.com/jobs/view/...">
+      </div>
+      <div class="form-group">
+        <div id="requirementsSourceMeta" class="source-meta"></div>
       </div>
       <div class="btn-row">
         <button class="btn-primary" id="analyzeBtn" onclick="analyzeJob()">Analyze</button>
@@ -513,6 +553,16 @@
           <option value="slii">SLII</option>
         </select>
       </div>
+      <div class="form-row">
+        <div>
+          <label for="candidateEmail">Candidate Email (optional)</label>
+          <input type="text" id="candidateEmail" placeholder="candidate@example.com">
+        </div>
+        <div>
+          <label for="linkTtlHours">Link TTL (hours)</label>
+          <input type="number" id="linkTtlHours" value="48" min="1" max="168">
+        </div>
+      </div>
       <div class="btn-row">
         <button class="btn-secondary" onclick="goToPhase(1)">&larr; Back</button>
         <button class="btn-primary" id="generateBtn" onclick="generateAssessment()">Generate Assessment</button>
@@ -535,8 +585,15 @@
       <h2 id="phase3Title">Conduct Interview</h2>
       <p class="desc" id="phase3Desc">Start a voice interview with the AI agent.</p>
       <div class="interview-link" id="interviewLinkBox">
-        <a id="interviewLink" href="#" target="_blank">Open Voice Interview &rarr;</a>
-        <p class="hint">Opens in a new tab. Complete the interview, then come back and click Continue.</p>
+        <label for="interviewLinkField">Candidate One-Time Link</label>
+        <input class="link-field" id="interviewLinkField" type="text" readonly value="">
+        <div class="link-actions">
+          <button class="btn-primary" id="copyInterviewLinkBtn" onclick="copyInterviewLink()">Copy Link</button>
+          <a id="interviewLink" href="#" target="_blank">Open Candidate Interview &rarr;</a>
+          <button class="btn-secondary" id="regenerateInterviewLinkBtn" onclick="regenerateInterviewLink()">Regenerate Link</button>
+        </div>
+        <div class="meta" id="interviewLinkMeta">Generate an assessment first to create a candidate link.</div>
+        <p class="hint">Send this link to the candidate. It is one-time use and opens the candidate interview flow directly.</p>
       </div>
       <div class="btn-row">
         <button class="btn-secondary" onclick="goToPhase(2)">&larr; Back</button>
@@ -633,6 +690,7 @@
       assessmentId: null,
       assessmentTypeCode: null,
       mbtiBootstrapJobRequirementsId: null,
+      latestInterviewLink: null,
     };
 
     const MBTI_BOOTSTRAP_JOB_DESCRIPTION = [
@@ -654,7 +712,7 @@
         ],
         phase1: {
           title: "Job Requirements Analysis",
-          desc: "Paste a job description below. The system will extract structured requirements using GPT.",
+          desc: "Paste a job description or provide a LinkedIn job posting URL. The system will extract structured requirements using GPT.",
         },
         phase2: {
           title: "Generate Assessment",
@@ -703,7 +761,7 @@
         ],
         phase1: {
           title: "Scenario Context",
-          desc: "Paste a role or leadership context below. The system will extract structured context before generating the SII assessment.",
+          desc: "Paste a role context or provide a LinkedIn job posting URL. The system will extract structured context before generating the SII assessment.",
         },
         phase2: {
           title: "Generate SII Assessment",
@@ -809,6 +867,7 @@
       document.getElementById("userOnlyGroup").style.display = state.assessmentTypeCode === "mbti" ? "flex" : "none";
 
       renderStepper();
+      toggleRequirementInputSource();
     }
 
     function resetAssessmentWorkflowState(options) {
@@ -822,23 +881,31 @@
       }
 
       document.getElementById("jobDesc").value = "";
+      document.getElementById("linkedinJobUrl").value = "";
+      document.getElementById("requirementSource").value = "description";
       document.getElementById("jobReqId").value = "";
       document.getElementById("assessmentIdPred").value = "";
       document.getElementById("questionsBody").innerHTML = "";
       document.getElementById("requirementsBody").innerHTML = "";
       document.getElementById("rationaleText").innerHTML = "";
       document.getElementById("interviewLink").href = "#";
-      document.getElementById("interviewLink").textContent = "Open Voice Interview →";
+      document.getElementById("interviewLink").textContent = "Open Candidate Interview →";
+      document.getElementById("interviewLinkField").value = "";
+      document.getElementById("interviewLinkMeta").textContent = "Generate an assessment first to create a candidate link.";
+      state.latestInterviewLink = null;
 
       document.getElementById("phase1Result").classList.remove("visible");
       document.getElementById("phase2Result").classList.remove("visible");
       document.getElementById("phase4Result").classList.remove("visible");
+      document.getElementById("requirementsSourceMeta").className = "source-meta";
+      document.getElementById("requirementsSourceMeta").innerHTML = "";
       document.getElementById("phase1Continue").style.display = "none";
       document.getElementById("phase2Continue").style.display = "none";
 
       hideStatus("phase1");
       hideStatus("phase2");
       hideStatus("phase4");
+      toggleRequirementInputSource();
     }
 
     function openAssessmentFlow(code) {
@@ -900,13 +967,38 @@
       });
 
       if (n === 3 && state.assessmentId) {
-        const link = document.getElementById("interviewLink");
-        link.href = "/agent/test?assessment_id=" + state.assessmentId;
-        link.textContent = "Open Voice Interview (" + formatAssessmentType(state.assessmentTypeCode) + " #" + state.assessmentId + ") →";
+        renderInterviewLink();
       }
       if (n === 4 && state.assessmentId) {
         document.getElementById("assessmentIdPred").value = state.assessmentId;
       }
+    }
+
+    function renderInterviewLink() {
+      const link = document.getElementById("interviewLink");
+      const field = document.getElementById("interviewLinkField");
+      const meta = document.getElementById("interviewLinkMeta");
+      const payload = state.latestInterviewLink;
+
+      if (!payload || !payload.interview_link) {
+        link.href = "#";
+        link.textContent = "Open Candidate Interview →";
+        field.value = "";
+        meta.textContent = "No one-time candidate link is available yet.";
+        return;
+      }
+
+      link.href = payload.interview_link;
+      link.textContent = "Open Candidate Interview (" + formatAssessmentType(state.assessmentTypeCode) + " #" + state.assessmentId + ") →";
+      field.value = payload.interview_link;
+
+      const parts = [
+        "Status: " + (payload.status || "unknown"),
+      ];
+      if (payload.candidate_email) parts.push("Candidate: " + payload.candidate_email);
+      if (payload.expires_at) parts.push("Expires: " + new Date(payload.expires_at).toLocaleString());
+      if (payload.used_at) parts.push("Used: " + new Date(payload.used_at).toLocaleString());
+      meta.textContent = parts.join(" • ");
     }
 
     function showStatus(phaseId, type, text) {
@@ -927,25 +1019,60 @@
       return "Leadership Core";
     }
 
+    function toggleRequirementInputSource() {
+      const source = document.getElementById("requirementSource").value;
+      document.getElementById("jobDescGroup").style.display = source === "description" ? "block" : "none";
+      document.getElementById("linkedinUrlGroup").style.display = source === "linkedin" ? "block" : "none";
+    }
+
     async function analyzeJob() {
+      const source = document.getElementById("requirementSource").value;
       const desc = document.getElementById("jobDesc").value.trim();
-      if (!desc) return;
+      const linkedinJobUrl = document.getElementById("linkedinJobUrl").value.trim();
+      if (source === "description" && !desc) return;
+      if (source === "linkedin" && !linkedinJobUrl) return;
       const btn = document.getElementById("analyzeBtn");
       btn.disabled = true;
-      showStatus("phase1", "loading", "Analyzing job description...");
+      showStatus(
+        "phase1",
+        "loading",
+        source === "linkedin" ? "Fetching LinkedIn job posting via Bright Data..." : "Analyzing job description..."
+      );
       document.getElementById("phase1Result").classList.remove("visible");
       document.getElementById("phase1Continue").style.display = "none";
+      document.getElementById("requirementsSourceMeta").className = "source-meta";
+      document.getElementById("requirementsSourceMeta").innerHTML = "";
 
       try {
-        const form = new FormData();
-        form.append("job_description", desc);
-        const res = await apiFetch("/job-requirements/analyze", { method: "POST", body: form });
+        let res;
+        if (source === "linkedin") {
+          res = await apiFetch("/job-requirements/analyze-linkedin-url", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ linkedin_job_url: linkedinJobUrl }),
+          });
+        } else {
+          const form = new FormData();
+          form.append("job_description", desc);
+          res = await apiFetch("/job-requirements/analyze", { method: "POST", body: form });
+        }
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
           throw new Error(err.detail || res.statusText);
         }
         const data = await res.json();
         state.jobRequirementsId = data.id;
+
+        const sourceMeta = document.getElementById("requirementsSourceMeta");
+        if (data.source === "linkedin_brightdata") {
+          const metaParts = [];
+          if (data.linkedin_job_title) metaParts.push("<div><strong>Job:</strong> " + escapeHtml(data.linkedin_job_title) + "</div>");
+          if (data.linkedin_company_name) metaParts.push("<div><strong>Company:</strong> " + escapeHtml(data.linkedin_company_name) + "</div>");
+          if (data.linkedin_job_location) metaParts.push("<div><strong>Location:</strong> " + escapeHtml(data.linkedin_job_location) + "</div>");
+          if (data.linkedin_job_url) metaParts.push('<div><strong>Source URL:</strong> <a href="' + escapeHtml(data.linkedin_job_url) + '" target="_blank" rel="noreferrer">' + escapeHtml(data.linkedin_job_url) + "</a></div>");
+          sourceMeta.innerHTML = metaParts.join("");
+          sourceMeta.className = "source-meta visible";
+        }
 
         const body = document.getElementById("requirementsBody");
         body.innerHTML = "";
@@ -994,6 +1121,8 @@
       const assessmentTypeCode = state.assessmentTypeCode || document.getElementById("assessmentType").value;
       let jobReqId = parseInt(document.getElementById("jobReqId").value, 10);
       const userId = getUserId();
+      const candidateEmail = document.getElementById("candidateEmail").value.trim();
+      const linkTtlHours = parseInt(document.getElementById("linkTtlHours").value, 10) || 48;
       if (!userId) { alert("Fill in the User ID."); return; }
       if (assessmentTypeCode !== "mbti" && !jobReqId) {
         alert("Fill in both Job Requirements ID and User ID.");
@@ -1018,7 +1147,15 @@
         const res = await apiFetch("/assessments/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ job_requirements_id: jobReqId, user_id: userId, assessment_type_code: assessmentTypeCode }),
+          body: JSON.stringify({
+            job_requirements_id: jobReqId,
+            user_id: userId,
+            assessment_type_code: assessmentTypeCode,
+            issue_one_time_link: true,
+            candidate_email: candidateEmail || null,
+            link_ttl_hours: linkTtlHours,
+            issued_reason: "test_pipeline",
+          }),
         });
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
@@ -1027,6 +1164,7 @@
         const data = await res.json();
         state.assessmentId = data.id;
         state.assessmentTypeCode = data.assessment_type_code || assessmentTypeCode;
+        state.latestInterviewLink = data.latest_interview_link || null;
 
         const body = document.getElementById("questionsBody");
         body.innerHTML = "";
@@ -1050,6 +1188,60 @@
         showStatus("phase2", "error", "Error: " + e.message);
       } finally {
         btn.disabled = false;
+      }
+    }
+
+    async function regenerateInterviewLink() {
+      if (!state.assessmentId) {
+        alert("Generate an assessment first.");
+        return;
+      }
+      const btn = document.getElementById("regenerateInterviewLinkBtn");
+      const candidateEmail = document.getElementById("candidateEmail").value.trim();
+      const ttlHours = parseInt(document.getElementById("linkTtlHours").value, 10) || 48;
+      btn.disabled = true;
+      try {
+        const res = await apiFetch("/assessments/" + state.assessmentId + "/invite-link", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            candidate_email: candidateEmail || null,
+            ttl_hours: ttlHours,
+            issued_reason: "test_pipeline_regenerate",
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || res.statusText);
+        }
+        state.latestInterviewLink = await res.json();
+        renderInterviewLink();
+      } catch (e) {
+        alert("Could not regenerate interview link: " + e.message);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function copyInterviewLink() {
+      const payload = state.latestInterviewLink;
+      if (!payload || !payload.interview_link) {
+        alert("No candidate link available yet.");
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(payload.interview_link);
+        const btn = document.getElementById("copyInterviewLinkBtn");
+        const original = btn.textContent;
+        btn.textContent = "Copied";
+        setTimeout(function () {
+          btn.textContent = original;
+        }, 1200);
+      } catch (_) {
+        const field = document.getElementById("interviewLinkField");
+        field.focus();
+        field.select();
+        document.execCommand("copy");
       }
     }
 

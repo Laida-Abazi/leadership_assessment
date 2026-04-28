@@ -17,3 +17,4 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     assessments = relationship("Assessments", back_populates="user")
+    issued_interview_links = relationship("AssessmentAccessLink", back_populates="created_by")

@@ -13,10 +13,11 @@ from pathlib import Path
 from typing import Optional
 
 import websockets.exceptions
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
-from app.auth.login.service import decode_access_token
+from app.auth.candidate_access import CANDIDATE_ACCESS_COOKIE_NAME, get_candidate_access_context
+from app.auth.login.deps import get_current_user_id
 from app.as_requirements.config.models_setup import MODEL_MINI, get_openai_client
 from app.db import SessionLocal
 from app.db.models import Assessments, ResponseSegment, User
@@ -67,6 +68,14 @@ def _preview_text(text: str, limit: int = 120) -> str:
     if len(s) <= limit:
         return s
     return s[:limit].rstrip() + "…"
+
+
+def _safe_query_params_for_log(websocket: WebSocket) -> dict[str, str]:
+    redacted_keys = {"access_token", "candidate_token"}
+    safe: dict[str, str] = {}
+    for key, value in dict(getattr(websocket, "query_params", {}) or {}).items():
+        safe[key] = "[redacted]" if key in redacted_keys and value else value
+    return safe
 
 def _assessment_questions_list(assessment: Assessments, db=None) -> list[str]:
     """Return canonical assessment prompts in order, preferring normalized items."""
@@ -349,11 +358,13 @@ def agent_websocket_docs():
         "local_url_example": "ws://localhost:8000/agent/ws?access_token=<JWT>",
         "production_url_pattern": "wss://<your-domain>/agent/ws?access_token=<JWT>",
         "optional_query_params": {
-            "assessment_id": "int - run structured interview flow and persist answers"
+            "assessment_id": "int - run structured interview flow and persist answers",
+            "candidate_token": "candidate session token for one-time-link interviews (cookie preferred)",
         },
         "auth": (
-            "Required query param: access_token. "
-            "Missing/invalid/expired/unverified sessions are rejected (close code 1008)."
+            "Provide either a verified admin session (authorization header, cookie, or access_token query) "
+            "or a valid candidate interview session (candidate cookie or candidate_token query). "
+            "Missing/invalid sessions are rejected (close code 1008)."
         ),
         "message_contract": {
             "client_to_server": [
@@ -385,22 +396,30 @@ async def agent_websocket(websocket: WebSocket):
     Client → server : raw 16-bit PCM, 16 kHz, mono (no header)
     Server → client : raw 16-bit PCM, 24 kHz, mono (no header)
     """
-    token = websocket.query_params.get("access_token")
-    if not token:
+    candidate_token = websocket.query_params.get("candidate_token") or websocket.cookies.get(CANDIDATE_ACCESS_COOKIE_NAME)
+    admin_token = (
+        websocket.query_params.get("access_token")
+        or websocket.cookies.get("access_token")
+        or websocket.headers.get("authorization")
+    )
+    if not candidate_token and not admin_token:
         await websocket.close(code=1008, reason="Authentication required.")
         return
 
     db_auth = SessionLocal()
+    candidate_context = None
     try:
-        
         try:
-            user_id = decode_access_token(token)
-        except Exception:
+            if candidate_token:
+                candidate_context = get_candidate_access_context(websocket)
+            else:
+                user_id = get_current_user_id(websocket)
+                user = db_auth.get(User, user_id)
+                if not user or not user.is_verified:
+                    await websocket.close(code=1008, reason="Authentication required.")
+                    return
+        except HTTPException:
             await websocket.close(code=1008, reason="Invalid or expired session.")
-            return
-        user = db_auth.get(User, user_id)
-        if not user or not user.is_verified:
-            await websocket.close(code=1008, reason="Authentication required.")
             return
     finally:
         db_auth.close()
@@ -413,23 +432,27 @@ async def agent_websocket(websocket: WebSocket):
         client_host = None
 
     logger.info(
-        "[%s] WebSocket connect: client=%s query=%s",
+        "[%s] WebSocket connect: client=%s auth_mode=%s query=%s",
         session_id,
         client_host,
-        dict(getattr(websocket, "query_params", {}) or {}),
+        "candidate" if candidate_context else "admin",
+        _safe_query_params_for_log(websocket),
     )
 
     await websocket.accept()
     logger.info("[%s] WebSocket accepted.", session_id)
 
     # ── Resolve assessment (if any) ───────────────────────────────────────────
-    assessment_id: Optional[int] = None
+    assessment_id: Optional[int] = candidate_context.assessment_id if candidate_context else None
     raw_id = websocket.query_params.get("assessment_id")
     if raw_id:
         try:
             assessment_id = int(raw_id)
         except ValueError:
             pass
+    if candidate_context and assessment_id != candidate_context.assessment_id:
+        await websocket.close(code=1008, reason="Candidate session does not match this assessment.")
+        return
     logger.info("[%s] assessment_id parsed: raw=%r parsed=%s", session_id, raw_id, assessment_id)
 
     system_instruction = DEFAULT_SYSTEM_INSTRUCTION
@@ -447,19 +470,20 @@ async def agent_websocket(websocket: WebSocket):
             assessment = db.get(Assessments, assessment_id)
             if assessment:
                 logger.info("[%s] Assessment found: id=%s user_id=%s", session_id, assessment_id, assessment.user_id)
-                user = db.get(User, assessment.user_id)
-                if user:
-                    candidate_name = (
-                        f"{(user.name or '').strip()} {(user.surname or '').strip()}".strip() or None
-                    )
-                    logger.info("[%s] Candidate resolved: %r", session_id, candidate_name)
-                else:
-                    logger.warning(
-                        "[%s] Candidate user missing: assessment_id=%s user_id=%s",
-                        session_id,
-                        assessment_id,
-                        assessment.user_id,
-                    )
+                if not candidate_context:
+                    user = db.get(User, assessment.user_id)
+                    if user:
+                        candidate_name = (
+                            f"{(user.name or '').strip()} {(user.surname or '').strip()}".strip() or None
+                        )
+                        logger.info("[%s] Candidate resolved: %r", session_id, candidate_name)
+                    else:
+                        logger.warning(
+                            "[%s] Candidate user missing: assessment_id=%s user_id=%s",
+                            session_id,
+                            assessment_id,
+                            assessment.user_id,
+                        )
                 job_requirements_id = assessment.job_requirements_id
                 definition = get_assessment_definition(assessment.assessment_type_code)
                 assessment_label = definition.name
@@ -577,6 +601,51 @@ async def agent_websocket(websocket: WebSocket):
 
     def _is_interview_mode() -> bool:
         return assessment_id is not None and bool(response_fields)
+
+    def _schedule_final_analysis_if_ready(reason: str) -> bool:
+        if (
+            assessment_id is None
+            or job_requirements_id is None
+            or not response_fields
+        ):
+            return False
+
+        saved_answers = _count_saved_responses(assessment_id, response_fields)
+        if (
+            state.get("current_question_finalized")
+            and 0 <= state.get("current_q", -1) < len(response_fields)
+        ):
+            saved_answers = max(saved_answers, state["current_q"] + 1)
+
+        if saved_answers < len(response_fields):
+            logger.info(
+                "[%s] Final analysis not scheduled yet: reason=%s saved=%s total=%s",
+                session_id,
+                reason,
+                saved_answers,
+                len(response_fields),
+            )
+            return False
+
+        if not interview_complete.is_set():
+            interview_complete.set()
+
+        from app.services.intelligence import schedule_final_analysis
+
+        scheduled = schedule_final_analysis(
+            assessment_id=assessment_id,
+            job_requirements_id=job_requirements_id,
+        )
+        logger.info(
+            "[%s] Final analysis readiness reached: reason=%s assessment_id=%s scheduled=%s saved=%s total=%s",
+            session_id,
+            reason,
+            assessment_id,
+            scheduled,
+            saved_answers,
+            len(response_fields),
+        )
+        return scheduled
 
     def _classify_agent_turn(text: str) -> str:
         """
@@ -804,6 +873,7 @@ async def agent_websocket(websocket: WebSocket):
         register_signal_task(assessment_id, task)
         state["current_question_finalized"] = True
         state["transcript_since_last_segment"] = ""
+        _schedule_final_analysis_if_ready(reason)
         return True
 
     def _finalize_current_question_on_exit(reason: str) -> bool:
@@ -930,14 +1000,8 @@ async def agent_websocket(websocket: WebSocket):
         state["question_session_open"] = True
         state["output_transcript"] = ""   # reset accumulator for the new question
 
-        if state["current_q"] >= len(response_fields) and not interview_complete.is_set():
-            interview_complete.set()
-            if assessment_id is not None and job_requirements_id is not None:
-                from app.services.intelligence import schedule_final_analysis
-                schedule_final_analysis(
-                    assessment_id=assessment_id,
-                    job_requirements_id=job_requirements_id,
-                )
+        if state["current_q"] >= len(response_fields):
+            _schedule_final_analysis_if_ready("agent_advanced_past_last_question")
 
     def signal_client_disconnect() -> None:
         if client_disconnected.is_set():
@@ -1081,7 +1145,8 @@ async def agent_websocket(websocket: WebSocket):
                     len(response_fields),
                     len((state["transcript"] or "").strip()),
                 )
-                _finalize_current_question_on_exit("client_disconnect_recovery")
+                if _finalize_current_question_on_exit("client_disconnect_recovery"):
+                    _schedule_final_analysis_if_ready("client_disconnect_recovery")
             signal_client_disconnect()
             logger.info(
                 "[%s] read_client_audio finished. total_audio_frames=%s total_audio_bytes=%s",
@@ -1488,14 +1553,7 @@ async def agent_websocket(websocket: WebSocket):
                                                         assessment_id,
                                                     )
                                                     _finalize_current_question("agent_complete_signal")
-                                                    if not interview_complete.is_set():
-                                                        interview_complete.set()
-                                                        if assessment_id is not None and job_requirements_id is not None:
-                                                            from app.services.intelligence import schedule_final_analysis
-                                                            schedule_final_analysis(
-                                                                assessment_id=assessment_id,
-                                                                job_requirements_id=job_requirements_id,
-                                                            )
+                                                    _schedule_final_analysis_if_ready("agent_complete_signal")
 
                                             # Reset agent-turn output accumulator (classifier starts fresh).
                                             state["output_transcript"] = ""
@@ -1599,7 +1657,8 @@ async def agent_websocket(websocket: WebSocket):
                                     # so the recovery branch can preserve substantial first answers.
                                     _on_user_turn_finished()
                                 elif client_disconnected.is_set():
-                                    _finalize_current_question_on_exit("gemini_session_end_recovery")
+                                    if _finalize_current_question_on_exit("gemini_session_end_recovery"):
+                                        _schedule_final_analysis_if_ready("gemini_session_end_recovery")
 
                     # ── Run sub-tasks ─────────────────────────────────────────
                     pump_task = asyncio.create_task(pump_audio_to_gemini(), name="pump->gemini")

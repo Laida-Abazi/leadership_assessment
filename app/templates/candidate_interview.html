@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Candidate Interview</title>
+  <style>
+    :root {
+      --bg: #0f0f12;
+      --surface: #1a1a1f;
+      --surface-alt: #222228;
+      --border: #2d2d35;
+      --text: #e8e6e3;
+      --muted: #8b8685;
+      --accent: #7c9cff;
+      --accent-hover: #9ab0ff;
+      --danger: #e07c7c;
+      --success: #7cc97c;
+      --warning: #e0c97c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "DM Sans", system-ui, sans-serif;
+      padding: 1.5rem;
+    }
+    .shell {
+      max-width: 920px;
+      margin: 0 auto;
+      display: grid;
+      gap: 1rem;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 1.5rem;
+    }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { font-size: 1.5rem; margin-bottom: 0.4rem; }
+    .sub { color: var(--muted); line-height: 1.5; margin-bottom: 1.25rem; }
+    .status {
+      border-radius: 12px;
+      padding: 0.85rem 1rem;
+      margin-bottom: 1rem;
+      font-size: 0.95rem;
+      background: var(--surface-alt);
+      color: var(--muted);
+    }
+    .status.connecting { color: var(--accent); }
+    .status.connected { color: var(--success); }
+    .status.processing { color: var(--warning); }
+    .status.error { color: var(--danger); }
+    button {
+      font: inherit;
+      border: none;
+      border-radius: 10px;
+      padding: 0.85rem 1.5rem;
+      cursor: pointer;
+      font-weight: 600;
+      transition: background 0.2s;
+    }
+    button.primary { background: var(--accent); color: #0f0f12; }
+    button.primary:hover { background: var(--accent-hover); }
+    button.danger { background: rgba(224,124,124,0.16); color: var(--danger); }
+    .hint { color: var(--muted); font-size: 0.9rem; line-height: 1.5; margin-top: 0.9rem; }
+    .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    .metric {
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1rem;
+    }
+    .metric-label { color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    .metric-value { margin-top: 0.4rem; font-size: 1.15rem; font-weight: 600; }
+    .hidden { display: none; }
+    pre, .text-block {
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1rem;
+      white-space: pre-wrap;
+      line-height: 1.6;
+      font-family: inherit;
+      margin: 0;
+    }
+    ul {
+      margin: 0;
+      padding-left: 1.2rem;
+      color: var(--text);
+    }
+    .stack { display: grid; gap: 0.75rem; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="card">
+      <h1>Interview Session</h1>
+      <p class="sub">Use the button below to start your one-time interview session. When the interview ends, your analysis and recommendation will appear here automatically.</p>
+      <div id="status" class="status">Preparing interview session…</div>
+      <button id="btn" class="primary">Start Interview</button>
+      <p class="hint">Allow microphone access. After the connection is established, answer each question naturally and wait for the next one.</p>
+    </section>
+
+    <section id="results" class="card hidden">
+      <h2>Your Results</h2>
+      <div class="grid">
+        <div class="metric">
+          <div class="metric-label">Pipeline Status</div>
+          <div id="metric-status" class="metric-value">Pending</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Fit Score</div>
+          <div id="metric-fit" class="metric-value">-</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Confidence</div>
+          <div id="metric-confidence" class="metric-value">-</div>
+        </div>
+      </div>
+      <div class="stack" style="margin-top: 1rem;">
+        <div>
+          <h3>Recommendation</h3>
+          <div id="recommendation" class="text-block">Processing has not finished yet.</div>
+        </div>
+        <div>
+          <h3>Analysis</h3>
+          <div id="analysis" class="text-block">Processing has not finished yet.</div>
+        </div>
+        <div>
+          <h3>Risk Flags</h3>
+          <div id="risk-flags" class="text-block">No risk flags yet.</div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    (function () {
+      const statusEl = document.getElementById("status");
+      const btn = document.getElementById("btn");
+      const resultsEl = document.getElementById("results");
+      const metricStatusEl = document.getElementById("metric-status");
+      const metricFitEl = document.getElementById("metric-fit");
+      const metricConfidenceEl = document.getElementById("metric-confidence");
+      const recommendationEl = document.getElementById("recommendation");
+      const analysisEl = document.getElementById("analysis");
+      const riskFlagsEl = document.getElementById("risk-flags");
+
+      const params = new URLSearchParams(window.location.search);
+      const assessmentId = parseInt(params.get("assessment_id") || "", 10);
+      if (!assessmentId || Number.isNaN(assessmentId)) {
+        setStatus("error", "Interview session is missing its assessment reference.");
+        btn.disabled = true;
+        return;
+      }
+
+      const OUTPUT_SAMPLE_RATE = 24000;
+      const MAX_RECONNECT_ATTEMPTS = 20;
+      let ws = null;
+      let stream = null;
+      let audioContext = null;
+      let captureSourceNode = null;
+      let captureWorkletNode = null;
+      let playbackContext = null;
+      let nextPlayTime = 0;
+      let interviewComplete = false;
+      let userDisconnected = false;
+      let hadInterviewConnection = false;
+      let reconnectAttempts = 0;
+      let reconnectTimer = null;
+      let pollingTimer = null;
+
+      function setStatus(kind, text) {
+        statusEl.className = "status " + kind;
+        statusEl.textContent = text;
+      }
+
+      function setConnected(connected) {
+        btn.textContent = connected ? "Finish Interview" : "Start Interview";
+        btn.className = connected ? "danger" : "primary";
+      }
+
+      function playPCM24k(pcmBytes) {
+        if (!playbackContext) return;
+        if (playbackContext.state === "suspended") playbackContext.resume();
+        const now = playbackContext.currentTime;
+        if (nextPlayTime < now - 0.1) nextPlayTime = now;
+        const numSamples = pcmBytes.byteLength / 2;
+        const buffer = playbackContext.createBuffer(1, numSamples, OUTPUT_SAMPLE_RATE);
+        const channel = buffer.getChannelData(0);
+        const view = new Int16Array(pcmBytes.buffer, pcmBytes.byteOffset, numSamples);
+        for (let i = 0; i < numSamples; i++) channel[i] = view[i] / 32768;
+        const node = playbackContext.createBufferSource();
+        node.buffer = buffer;
+        node.connect(playbackContext.destination);
+        const start = Math.max(nextPlayTime, now);
+        node.start(start);
+        nextPlayTime = start + buffer.duration;
+      }
+
+      const workletCode = `
+        const INPUT_SR = 16000;
+        const CHUNK_MS = 80;
+        const OUT_SAMPLES = Math.floor((INPUT_SR * CHUNK_MS) / 1000);
+        const IN_SAMPLES = OUT_SAMPLES * 3;
+        let floatBuf = [];
+        class MicResampler extends AudioWorkletProcessor {
+          process(inputs) {
+            const input = inputs[0]?.[0];
+            if (!input) return true;
+            for (let i = 0; i < input.length; i++) floatBuf.push(input[i]);
+            while (floatBuf.length >= IN_SAMPLES) {
+              const chunk = floatBuf.splice(0, IN_SAMPLES);
+              const out = new Int16Array(OUT_SAMPLES);
+              for (let i = 0; i < OUT_SAMPLES; i++) {
+                const srcIdx = (i * chunk.length) / OUT_SAMPLES;
+                const idx = Math.floor(srcIdx);
+                const frac = srcIdx - idx;
+                const v = idx + 1 < chunk.length
+                  ? chunk[idx] * (1 - frac) + chunk[idx + 1] * frac
+                  : chunk[idx];
+                out[i] = Math.max(-32768, Math.min(32767, Math.round(v * 32767)));
+              }
+              this.port.postMessage(out.buffer, [out.buffer]);
+            }
+            return true;
+          }
+        }
+        registerProcessor("mic-resampler", MicResampler);
+      `;
+
+      async function startCapture() {
+        if (stream && captureWorkletNode && audioContext) return;
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+        const blob = new Blob([workletCode], { type: "application/javascript" });
+        const workletUrl = URL.createObjectURL(blob);
+        await audioContext.audioWorklet.addModule(workletUrl);
+        URL.revokeObjectURL(workletUrl);
+        captureSourceNode = audioContext.createMediaStreamSource(stream);
+        captureWorkletNode = new AudioWorkletNode(audioContext, "mic-resampler", { numberOfInputs: 1, numberOfOutputs: 1 });
+        captureWorkletNode.port.onmessage = function (event) {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            try { ws.send(event.data); } catch (_) {}
+          }
+        };
+        captureSourceNode.connect(captureWorkletNode);
+        captureWorkletNode.connect(audioContext.destination);
+        playbackContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: OUTPUT_SAMPLE_RATE });
+        nextPlayTime = 0;
+      }
+
+      function stopCapture() {
+        if (captureSourceNode) {
+          try { captureSourceNode.disconnect(); } catch (_) {}
+          captureSourceNode = null;
+        }
+        if (captureWorkletNode) {
+          try { captureWorkletNode.disconnect(); } catch (_) {}
+          captureWorkletNode = null;
+        }
+        if (stream) stream.getTracks().forEach((track) => track.stop());
+        stream = null;
+        audioContext = null;
+        playbackContext = null;
+      }
+
+      function clearReconnectTimer() {
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+      }
+
+      function clearPollingTimer() {
+        if (pollingTimer) {
+          clearTimeout(pollingTimer);
+          pollingTimer = null;
+        }
+      }
+
+      async function loadResults() {
+        try {
+          const [analysisRes, predictionsRes] = await Promise.all([
+            fetch("/candidate/assessment/" + assessmentId + "/analysis", { credentials: "same-origin" }),
+            fetch("/candidate/assessment/" + assessmentId + "/predictions", { credentials: "same-origin" }),
+          ]);
+          if (!analysisRes.ok || !predictionsRes.ok) return;
+          const analysis = await analysisRes.json();
+          const predictions = await predictionsRes.json();
+
+          resultsEl.classList.remove("hidden");
+          recommendationEl.textContent = predictions.hiring_recommendation || "No recommendation available.";
+          analysisEl.textContent = analysis.analysis_text || "No analysis available.";
+          metricFitEl.textContent = formatScore(predictions.fit_score);
+          metricConfidenceEl.textContent = formatScore(predictions.confidence_score);
+          riskFlagsEl.textContent = formatRiskFlags(predictions.risk_flags);
+        } catch (_) {}
+      }
+
+      function formatScore(value) {
+        if (typeof value !== "number") return "-";
+        return Math.round(value * 100) + "%";
+      }
+
+      function formatRiskFlags(flags) {
+        if (!Array.isArray(flags) || !flags.length) return "No major risk flags identified.";
+        return flags
+          .map(function (flag) {
+            if (!flag || typeof flag !== "object") return String(flag || "");
+            const label = formatRiskFlagType(flag.type);
+            if (flag.type === "gap" && Array.isArray(flag.missing_traits) && flag.missing_traits.length) {
+              const category = flag.category ? formatRiskFlagType(flag.category) : "Missing traits";
+              return "• " + category + ": " + flag.missing_traits.join(", ");
+            }
+            if (flag.detail) {
+              return "• " + (label ? (label + ": ") : "") + String(flag.detail);
+            }
+            return "• " + (label || "Risk flag");
+          })
+          .filter(Boolean)
+          .join("\n\n");
+      }
+
+      function formatRiskFlagType(type) {
+        if (!type) return "";
+        return String(type)
+          .split("_")
+          .filter(Boolean)
+          .map(function (part) {
+            return part.charAt(0).toUpperCase() + part.slice(1);
+          })
+          .join(" ");
+      }
+
+      function resetPendingResultCopy() {
+        recommendationEl.textContent = "Processing has not finished yet.";
+        analysisEl.textContent = "Processing has not finished yet.";
+        riskFlagsEl.textContent = "No risk flags yet.";
+        metricFitEl.textContent = "-";
+        metricConfidenceEl.textContent = "-";
+      }
+
+      function scheduleStatusPoll(delayMs) {
+        clearPollingTimer();
+        pollingTimer = setTimeout(pollForResults, delayMs);
+      }
+
+      async function pollForResults() {
+        clearPollingTimer();
+        try {
+          const response = await fetch("/candidate/assessment/" + assessmentId + "/status", { credentials: "same-origin" });
+          if (!response.ok) {
+            setStatus("error", "Unable to check interview processing status.");
+            return;
+          }
+          const status = await response.json();
+          resultsEl.classList.remove("hidden");
+          metricStatusEl.textContent = (status.status || "pending").toUpperCase();
+
+          if (status.status === "completed") {
+            setStatus("connected", "Interview complete. Your analysis is ready.");
+            await loadResults();
+            return;
+          }
+          if (status.status === "failed") {
+            setStatus("error", "Interview complete, but analysis failed. Please contact the team.");
+            recommendationEl.textContent = "Processing failed before a recommendation could be generated.";
+            analysisEl.textContent = status.last_error || "An internal processing error occurred.";
+            metricFitEl.textContent = "-";
+            metricConfidenceEl.textContent = "-";
+            return;
+          }
+
+          const hasInterviewArtifacts = (
+            (status.segment_count || 0) > 0 ||
+            (status.signal_count || 0) > 0 ||
+            (status.pending_signal_tasks || 0) > 0 ||
+            status.analysis_running ||
+            status.analysis_ready ||
+            status.prediction_ready ||
+            interviewComplete
+          );
+
+          if (!hasInterviewArtifacts) {
+            resultsEl.classList.add("hidden");
+            metricStatusEl.textContent = "READY";
+            setStatus("connected", "Ready to start your interview.");
+            resetPendingResultCopy();
+            return;
+          }
+
+          resetPendingResultCopy();
+          if (status.analysis_running) {
+            setStatus("processing", "Interview complete. Running final analysis now…");
+          } else if ((status.pending_signal_tasks || 0) > 0) {
+            setStatus("processing", "Interview complete. Extracting signals from your responses…");
+          } else {
+            setStatus("processing", "Interview complete. Processing your analysis now…");
+          }
+          scheduleStatusPoll(2000);
+        } catch (_) {
+          scheduleStatusPoll(3000);
+        }
+      }
+
+      function scheduleReconnect() {
+        if (userDisconnected || interviewComplete) return;
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+          setStatus("error", "Connection ended unexpectedly. Click Start Interview to reconnect.");
+          setConnected(false);
+          stopCapture();
+          return;
+        }
+        reconnectAttempts += 1;
+        const delay = Math.min(1000 * reconnectAttempts, 5000);
+        setStatus("connecting", "Reconnecting interview…");
+        clearReconnectTimer();
+        reconnectTimer = setTimeout(function () {
+          connect(true);
+        }, delay);
+      }
+
+      function connect(isReconnect) {
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const url = protocol + "//" + window.location.host + "/agent/ws?assessment_id=" + encodeURIComponent(assessmentId);
+        clearReconnectTimer();
+        setStatus("connecting", isReconnect ? "Reconnecting interview…" : "Connecting interview…");
+        ws = new WebSocket(url);
+        ws.binaryType = "arraybuffer";
+
+        ws.onmessage = function (event) {
+          if (typeof event.data === "string") {
+            try {
+              const message = JSON.parse(event.data);
+              if (message.ping) return;
+              if (message.status === "connected" || message.status === "reconnected") {
+                hadInterviewConnection = true;
+                reconnectAttempts = 0;
+                setStatus("connected", "Connected. You can start speaking.");
+                setConnected(true);
+                startCapture();
+                return;
+              }
+              if (typeof message.question_index === "number" && typeof message.total_questions === "number") {
+                const questionNumber = Math.min(message.question_index + 1, message.total_questions);
+                setStatus("connected", "Interview in progress. Question " + questionNumber + " of " + message.total_questions + ".");
+                return;
+              }
+              if (message.answers_saved) {
+                interviewComplete = true;
+                setConnected(false);
+                stopCapture();
+                setStatus("processing", "Interview complete. Processing your analysis now…");
+                pollForResults();
+                return;
+              }
+              if (message.error) {
+                setStatus("error", message.error);
+                setConnected(false);
+                stopCapture();
+                return;
+              }
+              if (message.interrupted) {
+                nextPlayTime = 0;
+              }
+            } catch (_) {}
+            return;
+          }
+          if (event.data instanceof ArrayBuffer && event.data.byteLength > 0) {
+            playPCM24k(new Uint8Array(event.data));
+          }
+        };
+
+        ws.onerror = function () {
+          if (!userDisconnected && !interviewComplete) {
+            setStatus("connecting", "Reconnecting interview…");
+          }
+        };
+
+        ws.onclose = function () {
+          ws = null;
+          if (interviewComplete) {
+            setConnected(false);
+            stopCapture();
+            pollForResults();
+            userDisconnected = false;
+            return;
+          }
+          if (userDisconnected) {
+            setConnected(false);
+            stopCapture();
+            if (hadInterviewConnection) {
+              setStatus("processing", "Checking interview progress…");
+              pollForResults();
+            } else {
+              setStatus("error", "Interview ended.");
+            }
+            userDisconnected = false;
+            return;
+          }
+          scheduleReconnect();
+        };
+      }
+
+      function disconnect() {
+        userDisconnected = true;
+        reconnectAttempts = 0;
+        clearReconnectTimer();
+        clearPollingTimer();
+        if (ws) {
+          ws.close();
+          ws = null;
+        }
+        setStatus("processing", "Checking interview progress…");
+        setConnected(false);
+        stopCapture();
+      }
+
+      btn.addEventListener("click", function () {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          disconnect();
+        } else {
+          connect(false);
+        }
+      });
+
+      resetPendingResultCopy();
+      pollForResults();
+    })();
+  </script>
+</body>
+</html>

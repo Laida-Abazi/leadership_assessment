@@ -30,6 +30,7 @@ from app.as_analysis.routes.analysis import router as analysis_router
 from app.auth.router import router as auth_router
 from app.auth.login.deps import require_authenticated_user
 from app.agent.routes import router as agent_router
+from app.routers.candidate import router as candidate_router
 from app.db import SessionLocal
 from app.routers.intelligence import router as intelligence_router
 from app.services.assessment_registry import ensure_assessment_types_seeded
@@ -72,11 +73,12 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(candidate_router)
 protected_dependencies = [Depends(require_authenticated_user)]
 app.include_router(job_requirements_router, dependencies=protected_dependencies)
 app.include_router(assessments_router, dependencies=protected_dependencies)
 app.include_router(analysis_router, dependencies=protected_dependencies)
-app.include_router(agent_router, dependencies=protected_dependencies)
+app.include_router(agent_router)
 app.include_router(intelligence_router, dependencies=protected_dependencies)
 
 
