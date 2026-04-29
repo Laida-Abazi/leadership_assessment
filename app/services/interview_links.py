@@ -205,44 +205,41 @@ def serialize_link_status(
     return payload
 
 
+def peek_assessment_access_link(db: Session, raw_token: str) -> AssessmentAccessLink:
+    if not one_time_interview_links_enabled():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=INVALID_LINK_DETAIL)
+
+    link = _get_link_for_token(db, raw_token, with_lock=False)
+    _ensure_link_available(link, now=utcnow())
+    return link
+
+
 def consume_assessment_access_link(
     db: Session,
     raw_token: str,
     *,
     fingerprint: str | None = None,
+    commit: bool = True,
 ) -> AssessmentAccessLink:
-    if not one_time_interview_links_enabled():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=INVALID_LINK_DETAIL)
-
-    link_id, secret = parse_public_link_token(raw_token)
     now = utcnow()
 
     try:
-        link = (
-            db.query(AssessmentAccessLink)
-            .filter(AssessmentAccessLink.id == link_id)
-            .with_for_update()
-            .first()
-        )
-        if not link:
-            raise_invalid_link()
+        if not one_time_interview_links_enabled():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=INVALID_LINK_DETAIL)
 
-        expected_hash = compute_token_hash(secret, link.token_salt)
-        if not hmac.compare_digest(expected_hash, link.token_hash):
-            raise_invalid_link()
-
-        if link.revoked_at is not None or link.expires_at <= now:
-            raise_invalid_link()
-        if link.used_at is not None or link.use_count >= link.max_uses:
-            raise_invalid_link()
+        link = _get_link_for_token(db, raw_token, with_lock=True)
+        _ensure_link_available(link, now=now)
 
         link.use_count += 1
         link.used_at = now
         link.used_by_fingerprint = fingerprint
         link.updated_at = now
         db.add(link)
-        db.commit()
-        db.refresh(link)
+        if commit:
+            db.commit()
+            db.refresh(link)
+        else:
+            db.flush()
         return link
     except HTTPException:
         db.rollback()
@@ -254,6 +251,28 @@ def consume_assessment_access_link(
 
 def raise_invalid_link() -> None:
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=INVALID_LINK_DETAIL)
+
+
+def _get_link_for_token(db: Session, raw_token: str, *, with_lock: bool) -> AssessmentAccessLink:
+    link_id, secret = parse_public_link_token(raw_token)
+    query = db.query(AssessmentAccessLink).filter(AssessmentAccessLink.id == link_id)
+    if with_lock:
+        query = query.with_for_update()
+    link = query.first()
+    if not link:
+        raise_invalid_link()
+
+    expected_hash = compute_token_hash(secret, link.token_salt)
+    if not hmac.compare_digest(expected_hash, link.token_hash):
+        raise_invalid_link()
+    return link
+
+
+def _ensure_link_available(link: AssessmentAccessLink, *, now: datetime) -> None:
+    if link.revoked_at is not None or link.expires_at <= now:
+        raise_invalid_link()
+    if link.used_at is not None or link.use_count >= link.max_uses:
+        raise_invalid_link()
 
 
 def utcnow() -> datetime:

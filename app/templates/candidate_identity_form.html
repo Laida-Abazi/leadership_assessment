@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Interview Access</title>
+  <style>
+    :root {
+      --bg: #0f0f12;
+      --surface: #1a1a1f;
+      --surface-alt: #222228;
+      --border: #2d2d35;
+      --text: #e8e6e3;
+      --muted: #8b8685;
+      --accent: #7c9cff;
+      --accent-hover: #9ab0ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "DM Sans", system-ui, sans-serif;
+      padding: 1.5rem;
+    }
+    .card {
+      width: min(100%, 520px);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 1.5rem;
+      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.24);
+    }
+    h1, p { margin-top: 0; }
+    p {
+      color: var(--muted);
+      line-height: 1.5;
+    }
+    form {
+      display: grid;
+      gap: 1rem;
+      margin-top: 1.25rem;
+    }
+    .grid {
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    }
+    label {
+      display: grid;
+      gap: 0.45rem;
+      font-size: 0.95rem;
+    }
+    input {
+      width: 100%;
+      background: var(--surface-alt);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.85rem 0.95rem;
+      font: inherit;
+    }
+    button {
+      border: none;
+      border-radius: 10px;
+      padding: 0.9rem 1.1rem;
+      background: var(--accent);
+      color: #0f0f12;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.2s ease;
+    }
+    button:hover {
+      background: var(--accent-hover);
+    }
+    .eyebrow {
+      display: inline-block;
+      padding: 0.35rem 0.65rem;
+      border-radius: 999px;
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 0.82rem;
+      margin-bottom: 1rem;
+    }
+  </style>
+</head>
+<body>
+  <section class="card">
+    <div class="eyebrow">Assessment Type: __ASSESSMENT_TYPE__</div>
+    <h1>Confirm Your Details</h1>
+    <p>Before entering the interview, please provide the candidate details that should be attached to this interview link.</p>
+
+    <form method="post" action="__FORM_ACTION__">
+      <div class="grid">
+        <label>
+          Name
+          <input name="first_name" type="text" autocomplete="given-name" required>
+        </label>
+        <label>
+          Surname
+          <input name="last_name" type="text" autocomplete="family-name" required>
+        </label>
+      </div>
+      <label>
+        Email
+        <input name="email" type="email" autocomplete="email" value="__PREFILLED_EMAIL__" required>
+      </label>
+      <button type="submit">Continue to Interview</button>
+    </form>
+  </section>
+</body>
+</html>

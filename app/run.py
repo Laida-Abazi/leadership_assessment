@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import HTMLResponse
 
 import uvicorn
 
@@ -97,19 +97,19 @@ def serve_test_pipeline():
 
 
 @app.get("/auth/login")
-def serve_login_page():
-    """Serve the login UI."""
-    path = Path(__file__).resolve().parent / "templates" / "auth_login.html"
-    content = path.read_text(encoding="utf-8")
-    return HTMLResponse(content, headers={"Cache-Control": "no-store"})
+def login_ui_not_served_here():
+    return {
+        "detail": "Login UI is not served by the API. Use the frontend application for login.",
+        "login_endpoint": "/auth/login",
+    }
 
 
 @app.get("/auth/signup")
-def serve_signup_page():
-    """Serve the signup UI."""
-    path = Path(__file__).resolve().parent / "templates" / "auth_signup.html"
-    content = path.read_text(encoding="utf-8")
-    return HTMLResponse(content, headers={"Cache-Control": "no-store"})
+def signup_ui_not_served_here():
+    return {
+        "detail": "Signup UI is not served by the API. Use the frontend application for signup.",
+        "signup_endpoint": "/auth/signup",
+    }
 
 
 def get_app():

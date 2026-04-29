@@ -5,6 +5,7 @@ from app.db.models.assessment_type import AssessmentType
 from app.db.models.assessment_item import AssessmentItem
 from app.db.models.assessment_answer import AssessmentAnswer
 from app.db.models.assessment_access_link import AssessmentAccessLink
+from app.db.models.assessment_candidate import AssessmentCandidate
 from app.db.models.assessment_result import AssessmentResult
 from app.db.models.responses import Responses
 from app.db.models.analysis import Analysis
@@ -22,6 +23,7 @@ __all__ = [
     "AssessmentItem",
     "AssessmentAnswer",
     "AssessmentAccessLink",
+    "AssessmentCandidate",
     "AssessmentResult",
     "Responses",
     "Analysis",

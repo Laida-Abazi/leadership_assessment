@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -11,7 +11,7 @@ from app.as_requirements.routes.ai_analysis import (
 )
 from app.auth.login.deps import get_current_user_id
 from app.db import get_db
-from app.db.models import Analysis, AssessmentAccessLink, Assessments, JobRequirements
+from app.db.models import Analysis, AssessmentAccessLink, AssessmentCandidate, Assessments, JobRequirements
 from app.rag.embeddings import get_context_for_agent, index_assessment
 from app.services.assessment_persistence import get_assessment_item_payloads, sync_assessment_items
 from app.services.assessment_registry import (
@@ -20,6 +20,7 @@ from app.services.assessment_registry import (
     ensure_assessment_types_seeded,
     get_assessment_definition,
 )
+from app.services.assessment_candidates import refresh_candidate_result_snapshots, serialize_candidate
 from app.services.interview_links import (
     get_latest_assessment_access_link,
     issue_assessment_access_link,
@@ -382,6 +383,27 @@ class AssessmentOverviewItemOut(BaseModel):
     latest_interview_link: InterviewLinkOut | None = None
 
 
+class AssessmentCandidateOut(BaseModel):
+    id: int
+    assessment_id: int
+    access_link_id: int | None = None
+    first_name: str
+    last_name: str
+    email: str
+    assessment_type_code: str
+    analysis: str | None = None
+    prediction: str | None = None
+    fit_score: float | None = None
+    confidence_score: float | None = None
+    risk_flags: dict | list | None = None
+    link_token: str
+    link_created_at: str | None = None
+    link_expires_at: str | None = None
+    last_result_sync_at: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
 class UserAssessmentsOverviewOut(BaseModel):
     technical_assessments: list[AssessmentOverviewItemOut]
     mbti_assessments: list[AssessmentOverviewItemOut]
@@ -509,3 +531,23 @@ def get_user_assessments_overview(
         )
 
     return response
+
+
+@router.get("/candidates", response_model=list[AssessmentCandidateOut])
+def list_assessment_candidates(
+    assessment_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user_id: int = Depends(get_current_user_id),
+):
+    query = (
+        db.query(AssessmentCandidate)
+        .join(Assessments, Assessments.id == AssessmentCandidate.assessment_id)
+        .filter(Assessments.user_id == current_user_id)
+        .order_by(AssessmentCandidate.created_at.desc(), AssessmentCandidate.id.desc())
+    )
+    if assessment_id is not None:
+        query = query.filter(AssessmentCandidate.assessment_id == assessment_id)
+
+    candidates = query.all()
+    refresh_candidate_result_snapshots(db, candidates)
+    return [AssessmentCandidateOut(**serialize_candidate(candidate)) for candidate in candidates]

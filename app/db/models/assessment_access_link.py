@@ -31,3 +31,4 @@ class AssessmentAccessLink(Base):
 
     assessment = relationship("Assessments", back_populates="access_links")
     created_by = relationship("User", back_populates="issued_interview_links")
+    candidate = relationship("AssessmentCandidate", back_populates="access_link", uselist=False)
