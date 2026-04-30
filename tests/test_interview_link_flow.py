@@ -14,12 +14,14 @@ from app.auth.candidate_access import (
     decode_candidate_session_token,
     require_candidate_assessment_access,
 )
+from app.services.assessment_candidates import _apply_result_snapshot
 from app.services.interview_links import (
     build_interview_link_url,
     compute_token_hash,
     consume_assessment_access_link,
     format_public_link_token,
     get_link_status,
+    peek_assessment_access_link,
     parse_public_link_token,
     utcnow,
 )
@@ -110,6 +112,20 @@ def test_consume_assessment_access_link_marks_link_used_and_rejects_reuse(monkey
     assert exc.value.status_code == 404
 
 
+def test_peek_assessment_access_link_keeps_link_unused(monkeypatch):
+    monkeypatch.setenv("ENABLE_ONE_TIME_INTERVIEW_LINKS", "true")
+    secret = "candidate-secret"
+    link = _build_link(secret)
+    session = _FakeSession(link)
+
+    previewed = peek_assessment_access_link(session, format_public_link_token(link.id, secret))
+
+    assert previewed is link
+    assert link.use_count == 0
+    assert link.used_at is None
+    assert session.commit_count == 0
+
+
 def test_get_link_status_prioritizes_used_before_revoked_or_expired():
     link = _build_link("secret")
     assert get_link_status(link) == "active"
@@ -143,6 +159,43 @@ def test_candidate_assessment_guard_rejects_cross_assessment_access():
     with pytest.raises(HTTPException) as exc:
         require_candidate_assessment_access(assessment_id=99, connection=connection)
     assert exc.value.status_code == 403
+
+
+def test_apply_result_snapshot_prefers_assessment_result_scores():
+    now = utcnow()
+    candidate = SimpleNamespace(
+        analysis_snapshot=None,
+        prediction_snapshot=None,
+        fit_score=None,
+        confidence_score=None,
+        risk_flags=None,
+        last_result_sync_at=None,
+    )
+    analysis = SimpleNamespace(analysis="Candidate shows strong ownership.")
+    prediction = SimpleNamespace(
+        prediction="Strong hire recommendation.",
+        fit_score=0.55,
+        confidence_score=0.61,
+        risk_flags=["watch delegation"],
+    )
+    result = SimpleNamespace(
+        fit_score=0.82,
+        confidence_score=0.77,
+        risk_flags=["minor risk"],
+        narrative="Narrative snapshot",
+        shared_result_json=None,
+        type_result_json=None,
+    )
+
+    changed = _apply_result_snapshot(candidate, analysis=analysis, prediction=prediction, result=result)
+
+    assert changed is True
+    assert candidate.analysis_snapshot == "Candidate shows strong ownership."
+    assert candidate.prediction_snapshot == "Strong hire recommendation."
+    assert candidate.fit_score == 0.82
+    assert candidate.confidence_score == 0.77
+    assert candidate.risk_flags == ["minor risk"]
+    assert candidate.last_result_sync_at >= now
 
 
 def test_schedule_final_analysis_retries_once_and_completes(monkeypatch):

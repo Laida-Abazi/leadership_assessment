@@ -97,19 +97,19 @@ def serve_test_pipeline():
 
 
 @app.get("/auth/login")
-def login_ui_not_served_here():
-    return {
-        "detail": "Login UI is not served by the API. Use the frontend application for login.",
-        "login_endpoint": "/auth/login",
-    }
+def serve_login_page():
+    """Serve the login UI."""
+    path = Path(__file__).resolve().parent / "templates" / "auth_login.html"
+    content = path.read_text(encoding="utf-8")
+    return HTMLResponse(content, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/auth/signup")
-def signup_ui_not_served_here():
-    return {
-        "detail": "Signup UI is not served by the API. Use the frontend application for signup.",
-        "signup_endpoint": "/auth/signup",
-    }
+def serve_signup_page():
+    """Serve the signup UI."""
+    path = Path(__file__).resolve().parent / "templates" / "auth_signup.html"
+    content = path.read_text(encoding="utf-8")
+    return HTMLResponse(content, headers={"Cache-Control": "no-store"})
 
 
 def get_app():
