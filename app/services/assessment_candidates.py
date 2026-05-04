@@ -94,23 +94,23 @@ def refresh_candidate_result_snapshots(
     if not candidate_list:
         return candidate_list
 
-    assessment_ids = list({candidate.assessment_id for candidate in candidate_list})
+    candidate_ids = [candidate.id for candidate in candidate_list]
     analyses = (
         db.query(Analysis)
-        .filter(Analysis.assessment_id.in_(assessment_ids))
-        .order_by(Analysis.assessment_id, Analysis.id.desc())
+        .filter(Analysis.candidate_id.in_(candidate_ids))
+        .order_by(Analysis.candidate_id, Analysis.id.desc())
         .all()
     )
-    latest_analysis_by_assessment_id: dict[int, Analysis] = {}
+    latest_analysis_by_candidate_id: dict[int, Analysis] = {}
     for row in analyses:
-        if row.assessment_id not in latest_analysis_by_assessment_id:
-            latest_analysis_by_assessment_id[row.assessment_id] = row
+        if row.candidate_id is not None and row.candidate_id not in latest_analysis_by_candidate_id:
+            latest_analysis_by_candidate_id[row.candidate_id] = row
 
     predictions_by_analysis_id: dict[int, Predictions] = {}
-    if latest_analysis_by_assessment_id:
+    if latest_analysis_by_candidate_id:
         prediction_rows = (
             db.query(Predictions)
-            .filter(Predictions.analysis_id.in_([row.id for row in latest_analysis_by_assessment_id.values()]))
+            .filter(Predictions.analysis_id.in_([row.id for row in latest_analysis_by_candidate_id.values()]))
             .order_by(Predictions.analysis_id, Predictions.id.desc())
             .all()
         )
@@ -120,16 +120,16 @@ def refresh_candidate_result_snapshots(
 
     result_rows = (
         db.query(AssessmentResult)
-        .filter(AssessmentResult.assessment_id.in_(assessment_ids))
+        .filter(AssessmentResult.candidate_id.in_(candidate_ids))
         .all()
     )
-    results_by_assessment_id = {row.assessment_id: row for row in result_rows}
+    results_by_candidate_id = {row.candidate_id: row for row in result_rows if row.candidate_id is not None}
 
     changed = False
     for candidate in candidate_list:
-        analysis = latest_analysis_by_assessment_id.get(candidate.assessment_id)
+        analysis = latest_analysis_by_candidate_id.get(candidate.id)
         prediction = predictions_by_analysis_id.get(analysis.id) if analysis else None
-        result = results_by_assessment_id.get(candidate.assessment_id)
+        result = results_by_candidate_id.get(candidate.id)
         changed = _apply_result_snapshot(candidate, analysis=analysis, prediction=prediction, result=result) or changed
 
     if changed:

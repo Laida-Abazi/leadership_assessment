@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Response
 from sqlalchemy.orm import Session
 
+from app.auth.candidate_access import CANDIDATE_ACCESS_COOKIE_NAME
 from app.auth.login.deps import ACCESS_TOKEN_COOKIE_NAME, require_authenticated_user
 from app.auth.logout.schemas import LogoutResponse
 from app.auth.logout.service import logout_user
@@ -22,4 +23,5 @@ async def logout(
 ):
     logout_user(db, user.id)
     response.delete_cookie(key=ACCESS_TOKEN_COOKIE_NAME, path="/")
+    response.delete_cookie(key=CANDIDATE_ACCESS_COOKIE_NAME, path="/")
     return LogoutResponse()

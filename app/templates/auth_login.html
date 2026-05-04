@@ -50,7 +50,6 @@
     <div class="foot">No account yet? <a id="signupLink" href="/auth/signup">Create one</a></div>
   </main>
   <script>
-    const ACCESS_TOKEN_KEY = "access_token";
     const params = new URLSearchParams(window.location.search);
     const next = params.get("next") || "/test/pipeline";
     document.getElementById("signupLink").href = "/auth/signup?next=" + encodeURIComponent(next);
@@ -70,32 +69,10 @@
       keysToRemove.forEach((key) => localStorage.removeItem(key));
     }
 
-    function getTokenPayload(token) {
-      try {
-        const payload = token.split(".")[1];
-        return JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
-      } catch (_) {
-        return null;
-      }
-    }
-
-    function isTokenValid(token) {
-      if (!token) return false;
-      const payload = getTokenPayload(token);
-      if (!payload || !payload.exp) return false;
-      return (payload.exp * 1000) > Date.now();
-    }
-
     clearForeignStorageKeys();
+    localStorage.removeItem("access_token");
     document.getElementById("email").value = "";
     document.getElementById("password").value = "";
-
-    const existing = localStorage.getItem(ACCESS_TOKEN_KEY);
-    if (isTokenValid(existing)) {
-      window.location.replace(next);
-    } else if (existing) {
-      localStorage.removeItem(ACCESS_TOKEN_KEY);
-    }
 
     document.getElementById("loginForm").addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -113,7 +90,6 @@
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.detail || "Login failed.");
-        localStorage.setItem(ACCESS_TOKEN_KEY, data.token.token);
         window.location.replace(next);
       } catch (err) {
         showMessage(err.message || "Login failed.", "error");

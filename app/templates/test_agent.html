@@ -84,6 +84,13 @@
       color: var(--muted);
       cursor: not-allowed;
     }
+    button.secondary {
+      margin-top: 0.75rem;
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    button.secondary:hover { background: #222228; }
     button.danger {
       background: rgba(224, 124, 124, 0.2);
       color: var(--danger);
@@ -103,11 +110,11 @@
     <p class="sub" id="sub">Have a friendly conversation with the assistant</p>
     <div id="status" class="status idle">Click Start to begin</div>
     <button id="btn" class="primary">Start Assessment</button>
+    <button id="restartBtn" class="secondary" type="button" hidden>Start Over</button>
     <p class="hint" id="hint">Allow microphone access. Speak after you see “Connected”. The agent will reply with voice.</p>
   </main>
   <script>
-    (function () {
-      const ACCESS_TOKEN_KEY = "access_token";
+    (async function () {
       (function clearForeignStorageKeys() {
         const keysToRemove = [];
         for (let i = 0; i < localStorage.length; i++) {
@@ -116,44 +123,17 @@
         }
         keysToRemove.forEach((key) => localStorage.removeItem(key));
       })();
+      localStorage.removeItem("access_token");
       const statusEl = document.getElementById("status");
       const btn = document.getElementById("btn");
+      const restartBtn = document.getElementById("restartBtn");
       const subEl = document.getElementById("sub");
       const hintEl = document.getElementById("hint");
-
-      function getTokenPayload(token) {
-        try {
-          const payload = token.split(".")[1];
-          return JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
-        } catch (_) {
-          return null;
-        }
-      }
-
-      function isTokenValid(token) {
-        if (!token) return false;
-        const payload = getTokenPayload(token);
-        if (!payload || !payload.exp) return false;
-        return (payload.exp * 1000) > Date.now();
-      }
 
       function redirectToLogin() {
         const next = window.location.pathname + window.location.search;
         window.location.replace("/auth/login?next=" + encodeURIComponent(next));
       }
-
-      function getAccessTokenOrRedirect() {
-        const token = localStorage.getItem(ACCESS_TOKEN_KEY);
-        if (!isTokenValid(token)) {
-          localStorage.removeItem(ACCESS_TOKEN_KEY);
-          redirectToLogin();
-          return null;
-        }
-        return token;
-      }
-
-      const currentToken = getAccessTokenOrRedirect();
-      if (!currentToken) return;
 
       const assessmentId = (function () {
         const params = new URLSearchParams(location.search);
@@ -166,9 +146,21 @@
         document.title = "Voice agent – assessment interview";
         subEl.textContent = "Complete the assessment interview. The agent will ask each item in sequence.";
         hintEl.textContent = "Allow microphone access. The agent will ask questions one by one—answer each, then wait for the next.";
+        restartBtn.hidden = false;
       } else if (hintEl) {
         hintEl.textContent = "Allow microphone access. Speak after you see \"Connected\". To run an assessment and save answers, open this page with ?assessment_id=1 (use your assessment ID).";
       }
+
+      async function ensureAuthenticated() {
+        const response = await fetch("/auth/me", { credentials: "same-origin" });
+        if (response.status === 401 || response.status === 403) {
+          redirectToLogin();
+          return false;
+        }
+        return response.ok;
+      }
+
+      if (!(await ensureAuthenticated())) return;
 
       const INPUT_SAMPLE_RATE = 16000;
       const OUTPUT_SAMPLE_RATE = 24000;
@@ -279,6 +271,12 @@
         }
         if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
         stream = null;
+        if (audioContext) {
+          try { audioContext.close(); } catch (_) {}
+        }
+        if (playbackContext) {
+          try { playbackContext.close(); } catch (_) {}
+        }
         audioContext = null;
         playbackContext = null;
       }
@@ -308,13 +306,10 @@
       }
 
       function connect(options) {
-        const token = getAccessTokenOrRedirect();
-        if (!token) return;
         const isReconnect = !!(options && options.isReconnect);
         const protocol = location.protocol === "https:" ? "wss:" : "ws:";
         let url = protocol + "//" + location.host + "/agent/ws";
         if (assessmentId != null) url += "?assessment_id=" + assessmentId;
-        url += (url.includes("?") ? "&" : "?") + "access_token=" + encodeURIComponent(token);
         clearReconnectTimer();
         setStatus("connecting", isReconnect ? "Reconnecting interview..." : "Connecting…");
         ws = new WebSocket(url);
@@ -346,7 +341,6 @@
                 setStatus("connecting", "Session interrupted, reconnecting\u2026");
               } else if (msg.error) {
                 if ((msg.error || "").toLowerCase().includes("auth")) {
-                  localStorage.removeItem(ACCESS_TOKEN_KEY);
                   redirectToLogin();
                   return;
                 }
@@ -399,12 +393,52 @@
         stopCapture();
       }
 
+      async function startOver() {
+        if (assessmentId == null) return;
+        const confirmed = window.confirm("Start over and clear all saved answers for this assessment?");
+        if (!confirmed) return;
+
+        disconnect();
+        setStatus("connecting", "Resetting saved interview state...");
+        try {
+          const response = await fetch("/agent/assessment/" + assessmentId + "/reset", {
+            method: "POST",
+            credentials: "same-origin",
+          });
+          if (response.status === 401 || response.status === 403) {
+            redirectToLogin();
+            return;
+          }
+          if (!response.ok) {
+            const payload = await response.json().catch(function () { return {}; });
+            throw new Error(payload.detail || "Could not reset this assessment.");
+          }
+          interviewComplete = false;
+          userDisconnected = false;
+          reconnectAttempts = 0;
+          nextPlayTime = 0;
+          setStatus("idle", "Saved interview state cleared. Click Start Assessment to begin again.");
+        } catch (error) {
+          setStatus("error", (error && error.message) || "Could not reset this assessment.");
+        }
+      }
+
       btn.addEventListener("click", function () {
         if (ws && ws.readyState === WebSocket.OPEN) {
           disconnect();
         } else {
           connect();
         }
+      });
+      restartBtn.addEventListener("click", startOver);
+      window.addEventListener("pagehide", function () {
+        userDisconnected = true;
+        clearReconnectTimer();
+        if (ws) {
+          try { ws.close(); } catch (_) {}
+          ws = null;
+        }
+        stopCapture();
       });
     })();
   </script>

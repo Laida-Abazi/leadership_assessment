@@ -12,6 +12,7 @@ class ResponseSignal(Base):
     id                  = Column(Integer, primary_key=True, index=True)
     response_segment_id = Column(Integer, ForeignKey("response_segments.id", ondelete="CASCADE"), nullable=True)
     assessment_id       = Column(Integer, ForeignKey("assessments.id", ondelete="CASCADE"), nullable=False)
+    candidate_id        = Column(Integer, ForeignKey("assessment_candidates.id", ondelete="CASCADE"), nullable=True, index=True)
     response_type       = Column(String(64), nullable=False)
     traits              = Column(JSONB, nullable=True)
     strengths           = Column(JSONB, nullable=True)
@@ -21,3 +22,4 @@ class ResponseSignal(Base):
 
     segment    = relationship("ResponseSegment", back_populates="signals")
     assessment = relationship("Assessments", back_populates="response_signals")
+    candidate  = relationship("AssessmentCandidate", back_populates="response_signals")

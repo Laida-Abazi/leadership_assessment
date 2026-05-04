@@ -12,6 +12,7 @@ class Analysis(Base):
     id = Column(Integer, primary_key=True, index=True)
     job_requirements_id = Column(Integer, ForeignKey("job_requirements.id"), nullable=False)
     assessment_id = Column(Integer, ForeignKey("assessments.id"), nullable=False)
+    candidate_id = Column(Integer, ForeignKey("assessment_candidates.id", ondelete="CASCADE"), nullable=True, index=True)
     responses_id = Column(Integer, ForeignKey("responses.id"), nullable=False)
     # Legacy text blob — kept for backward compatibility; new narrative summary also written here.
     analysis = Column(Text, nullable=False)
@@ -26,5 +27,6 @@ class Analysis(Base):
 
     job_requirements = relationship("JobRequirements", back_populates="analyses")
     assessment = relationship("Assessments", back_populates="analyses")
+    candidate = relationship("AssessmentCandidate", back_populates="analyses")
     responses = relationship("Responses", back_populates="analyses")
     predictions = relationship("Predictions", back_populates="analysis", uselist=False)

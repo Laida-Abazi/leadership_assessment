@@ -10,7 +10,8 @@ class AssessmentResult(Base):
     __tablename__ = "assessment_results"
 
     id = Column(Integer, primary_key=True, index=True)
-    assessment_id = Column(Integer, ForeignKey("assessments.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    assessment_id = Column(Integer, ForeignKey("assessments.id", ondelete="CASCADE"), nullable=False, index=True)
+    candidate_id = Column(Integer, ForeignKey("assessment_candidates.id", ondelete="CASCADE"), nullable=True, index=True)
     shared_result_json = Column(JSONB, nullable=True)
     type_result_json = Column(JSONB, nullable=True)
     narrative = Column(Text, nullable=False, default="")
@@ -21,3 +22,4 @@ class AssessmentResult(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     assessment = relationship("Assessments", back_populates="assessment_result")
+    candidate = relationship("AssessmentCandidate", back_populates="assessment_result")

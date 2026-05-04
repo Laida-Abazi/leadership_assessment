@@ -41,3 +41,9 @@ class AssessmentCandidate(Base):
 
     assessment = relationship("Assessments", back_populates="candidates")
     access_link = relationship("AssessmentAccessLink", back_populates="candidate")
+    answers = relationship("AssessmentAnswer", back_populates="candidate", cascade="all, delete-orphan")
+    responses = relationship("Responses", back_populates="candidate", uselist=False, cascade="all, delete-orphan")
+    response_segments = relationship("ResponseSegment", back_populates="candidate", cascade="all, delete-orphan")
+    response_signals = relationship("ResponseSignal", back_populates="candidate", cascade="all, delete-orphan")
+    analyses = relationship("Analysis", back_populates="candidate", cascade="all, delete-orphan")
+    assessment_result = relationship("AssessmentResult", back_populates="candidate", uselist=False, cascade="all, delete-orphan")

@@ -449,7 +449,7 @@ What it does:
 
 - lists candidate rows for the current authenticated admin user
 - optionally filters to a single assessment
-- includes result snapshots when available
+- includes candidate-specific result snapshots when available
 
 Typical response:
 
@@ -482,7 +482,7 @@ Use this for:
 
 - admin candidate tracking screen
 - seeing who has used the link
-- showing summary results after completion
+- showing one summary result per candidate after completion
 
 ## Recommended React Integration
 

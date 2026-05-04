@@ -4,7 +4,7 @@ Fits/gaps analysis of candidate responses vs job requirements and final hire pre
 import json
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -91,11 +91,17 @@ def _job_requirements_to_summary(job: JobRequirements) -> str:
     return "\n".join(parts) if parts else "No structured requirements provided."
 
 
-def _build_qa_block(db: Session, assessment: Assessments, responses: Responses | None) -> str:
+def _build_qa_block(
+    db: Session,
+    assessment: Assessments,
+    responses: Responses | None,
+    *,
+    candidate_id: int | None = None,
+) -> str:
     """Build a single text block of question type, question, and response for each answered question."""
     del responses  # Canonical answers are the source of truth when available.
     lines = []
-    for payload in iter_assessment_answers(db, assessment):
+    for payload in iter_assessment_answers(db, assessment, candidate_id=candidate_id):
         question = payload.get("question_text")
         answer = payload.get("answer_text") or "(No response)"
         if not question:
@@ -145,6 +151,7 @@ def _save_analysis_and_prediction(
     db: Session,
     job_requirements_id: int,
     assessment_id: int,
+    candidate_id: int | None,
     responses_id: int,
     analysis_text: str,
     verdict: str,
@@ -154,6 +161,7 @@ def _save_analysis_and_prediction(
     analysis_row = Analysis(
         job_requirements_id=job_requirements_id,
         assessment_id=assessment_id,
+        candidate_id=candidate_id,
         responses_id=responses_id,
         analysis=analysis_text,
     )
@@ -170,6 +178,7 @@ def _save_analysis_and_prediction(
 
 class RunAnalysisRequest(BaseModel):
     assessment_id: int
+    candidate_id: int | None = None
 
 
 class RunAnalysisResponse(BaseModel):
@@ -200,7 +209,12 @@ def run_analysis(
     job = assessment.job_requirements
     if not job:
         raise HTTPException(status_code=404, detail="Job requirements not found for this assessment")
-    responses = db.query(Responses).filter(Responses.assessment_id == body.assessment_id).first()
+    responses_query = db.query(Responses).filter(Responses.assessment_id == body.assessment_id)
+    if body.candidate_id is None:
+        responses_query = responses_query.filter(Responses.candidate_id.is_(None))
+    else:
+        responses_query = responses_query.filter(Responses.candidate_id == body.candidate_id)
+    responses = responses_query.first()
     if not responses:
         raise HTTPException(
             status_code=400,
@@ -208,13 +222,14 @@ def run_analysis(
         )
 
     job_summary = _job_requirements_to_summary(job)
-    qa_block = _build_qa_block(db, assessment, responses)
+    qa_block = _build_qa_block(db, assessment, responses, candidate_id=body.candidate_id)
     result = _run_fits_gaps_and_prediction(job_summary, qa_block)
 
     analysis_row, prediction_row = _save_analysis_and_prediction(
         db,
         job_requirements_id=job.id,
         assessment_id=assessment.id,
+        candidate_id=body.candidate_id,
         responses_id=responses.id,
         analysis_text=result["fits_and_gaps"],
         verdict=result["verdict"],
@@ -239,6 +254,7 @@ class GetAnalysisResponse(BaseModel):
 @router.get("/assessment/{assessment_id}", response_model=GetAnalysisResponse)
 def get_latest_analysis_for_assessment(
     assessment_id: int,
+    candidate_id: int | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
     """Return the most recent analysis and prediction for an assessment, if any."""
@@ -247,7 +263,10 @@ def get_latest_analysis_for_assessment(
         raise HTTPException(status_code=404, detail="Assessment not found")
     analysis_row = (
         db.query(Analysis)
-        .filter(Analysis.assessment_id == assessment_id)
+        .filter(
+            Analysis.assessment_id == assessment_id,
+            Analysis.candidate_id.is_(None) if candidate_id is None else Analysis.candidate_id == candidate_id,
+        )
         .order_by(Analysis.id.desc())
         .first()
     )

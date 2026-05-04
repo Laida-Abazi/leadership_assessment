@@ -36,9 +36,11 @@ from app.services.assessment_scoring import evaluate_assessment
 
 logger = logging.getLogger(__name__)
 
-_PENDING_SIGNAL_TASKS: dict[int, set[asyncio.Task]] = defaultdict(set)
-_ANALYSIS_TASKS: dict[int, asyncio.Task] = {}
-_ANALYSIS_STATE: dict[int, dict[str, Any]] = {}
+AnalysisScopeKey = int | tuple[int, int]
+
+_PENDING_SIGNAL_TASKS: dict[AnalysisScopeKey, set[asyncio.Task]] = defaultdict(set)
+_ANALYSIS_TASKS: dict[AnalysisScopeKey, asyncio.Task] = {}
+_ANALYSIS_STATE: dict[AnalysisScopeKey, dict[str, Any]] = {}
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -60,16 +62,29 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _scope_key(assessment_id: int, candidate_id: int | None = None) -> AnalysisScopeKey:
+    return assessment_id if candidate_id is None else (assessment_id, candidate_id)
+
+
+def _apply_candidate_scope(query, model, candidate_id: int | None):
+    if candidate_id is None:
+        return query.filter(model.candidate_id.is_(None))
+    return query.filter(model.candidate_id == candidate_id)
+
+
 def _set_analysis_state(
     assessment_id: int,
     status: str,
     *,
+    candidate_id: int | None = None,
     attempts: int | None = None,
     error: str | None = None,
 ) -> None:
-    state = dict(_ANALYSIS_STATE.get(assessment_id, {}))
+    key = _scope_key(assessment_id, candidate_id)
+    state = dict(_ANALYSIS_STATE.get(key, {}))
     state["status"] = status
     state["updated_at"] = _utcnow_iso()
+    state["candidate_id"] = candidate_id
     if attempts is not None:
         state["attempts"] = attempts
     if status == "running" and not state.get("started_at"):
@@ -81,7 +96,23 @@ def _set_analysis_state(
         state["last_error"] = error
     elif status in {"pending", "running"}:
         state["last_error"] = None
-    _ANALYSIS_STATE[assessment_id] = state
+    _ANALYSIS_STATE[key] = state
+
+
+def reset_intelligence_scope(assessment_id: int, *, candidate_id: int | None = None) -> None:
+    """Cancel and clear any in-memory intelligence work for this scope."""
+    key = _scope_key(assessment_id, candidate_id)
+
+    analysis_task = _ANALYSIS_TASKS.pop(key, None)
+    if analysis_task and not analysis_task.done():
+        analysis_task.cancel()
+
+    pending_tasks = list(_PENDING_SIGNAL_TASKS.pop(key, set()))
+    for task in pending_tasks:
+        if not task.done():
+            task.cancel()
+
+    _ANALYSIS_STATE.pop(key, None)
 
 # Role-fit recommendation thresholds (tune as needed).
 ROLE_READY_MIN_FIT = 0.80
@@ -104,45 +135,45 @@ async def _responses_create_async(client: openai.OpenAI, **kwargs):
     return await asyncio.to_thread(client.responses.create, **kwargs)
 
 
-def register_signal_task(assessment_id: int, task: asyncio.Task) -> None:
+def register_signal_task(assessment_id: int, task: asyncio.Task, *, candidate_id: int | None = None) -> None:
     """Track background signal extraction tasks so final analysis can await them."""
-    tasks = _PENDING_SIGNAL_TASKS[assessment_id]
+    key = _scope_key(assessment_id, candidate_id)
+    tasks = _PENDING_SIGNAL_TASKS[key]
     tasks.add(task)
 
     def _cleanup(done_task: asyncio.Task) -> None:
-        current = _PENDING_SIGNAL_TASKS.get(assessment_id)
+        current = _PENDING_SIGNAL_TASKS.get(key)
         if not current:
             return
         current.discard(done_task)
         if not current:
-            _PENDING_SIGNAL_TASKS.pop(assessment_id, None)
+            _PENDING_SIGNAL_TASKS.pop(key, None)
 
     task.add_done_callback(_cleanup)
 
 
-def get_intelligence_status(assessment_id: int) -> dict[str, Any]:
+def get_intelligence_status(assessment_id: int, *, candidate_id: int | None = None) -> dict[str, Any]:
     """Return background-processing status for an assessment."""
     db = SessionLocal()
     try:
-        segment_count = (
-            db.query(ResponseSegment)
-            .filter(ResponseSegment.assessment_id == assessment_id)
-            .count()
-        )
-        signal_count = (
-            db.query(ResponseSignal.response_segment_id)
-            .filter(
+        segment_count = _apply_candidate_scope(
+            db.query(ResponseSegment).filter(ResponseSegment.assessment_id == assessment_id),
+            ResponseSegment,
+            candidate_id,
+        ).count()
+        signal_count = _apply_candidate_scope(
+            db.query(ResponseSignal.response_segment_id).filter(
                 ResponseSignal.assessment_id == assessment_id,
                 ResponseSignal.response_segment_id.isnot(None),
-            )
-            .distinct()
-            .count()
-        )
-        analysis = (
-            db.query(Analysis)
-            .filter(Analysis.assessment_id == assessment_id)
-            .first()
-        )
+            ),
+            ResponseSignal,
+            candidate_id,
+        ).distinct().count()
+        analysis = _apply_candidate_scope(
+            db.query(Analysis).filter(Analysis.assessment_id == assessment_id),
+            Analysis,
+            candidate_id,
+        ).first()
         prediction = None
         if analysis:
             prediction = (
@@ -153,13 +184,14 @@ def get_intelligence_status(assessment_id: int) -> dict[str, Any]:
     finally:
         db.close()
 
-    analysis_task = _ANALYSIS_TASKS.get(assessment_id)
+    key = _scope_key(assessment_id, candidate_id)
+    analysis_task = _ANALYSIS_TASKS.get(key)
     pending_signal_tasks = [
         task
-        for task in _PENDING_SIGNAL_TASKS.get(assessment_id, set())
+        for task in _PENDING_SIGNAL_TASKS.get(key, set())
         if not task.done()
     ]
-    state = dict(_ANALYSIS_STATE.get(assessment_id, {}))
+    state = dict(_ANALYSIS_STATE.get(key, {}))
     status_value = state.get("status")
     if not status_value:
         if analysis_task and not analysis_task.done():
@@ -173,6 +205,7 @@ def get_intelligence_status(assessment_id: int) -> dict[str, Any]:
 
     return {
         "assessment_id": assessment_id,
+        "candidate_id": candidate_id,
         "status": status_value,
         "pending_signal_tasks": len(pending_signal_tasks),
         "segment_count": segment_count,
@@ -193,14 +226,16 @@ def get_intelligence_status(assessment_id: int) -> dict[str, Any]:
 async def _await_registered_signal_tasks(
     assessment_id: int,
     *,
+    candidate_id: int | None = None,
     max_wait_seconds: int = 60,
 ) -> None:
     """Wait for any in-flight signal extraction tasks registered for this assessment."""
+    key = _scope_key(assessment_id, candidate_id)
     deadline = time.monotonic() + max_wait_seconds
     while True:
         pending = [
             task
-            for task in _PENDING_SIGNAL_TASKS.get(assessment_id, set())
+            for task in _PENDING_SIGNAL_TASKS.get(key, set())
             if not task.done()
         ]
         if not pending:
@@ -224,6 +259,7 @@ def schedule_final_analysis(
     assessment_id: int,
     job_requirements_id: int,
     *,
+    candidate_id: int | None = None,
     max_wait_seconds: int = 60,
     retry_attempts: int = FINAL_ANALYSIS_RETRY_ATTEMPTS,
     retry_delay_seconds: float = FINAL_ANALYSIS_RETRY_DELAY_SECONDS,
@@ -234,11 +270,12 @@ def schedule_final_analysis(
     The task waits for any registered segment/signal extraction jobs to finish,
     then runs the analysis pipeline once.
     """
-    existing = _ANALYSIS_TASKS.get(assessment_id)
+    key = _scope_key(assessment_id, candidate_id)
+    existing = _ANALYSIS_TASKS.get(key)
     if existing and not existing.done():
         return False
 
-    _set_analysis_state(assessment_id, "pending", attempts=0)
+    _set_analysis_state(assessment_id, "pending", candidate_id=candidate_id, attempts=0)
 
     async def _runner() -> None:
         attempt = 0
@@ -251,15 +288,17 @@ def schedule_final_analysis(
                         assessment_id,
                         attempt,
                     )
-                    _set_analysis_state(assessment_id, "pending", attempts=attempt)
+                    _set_analysis_state(assessment_id, "pending", candidate_id=candidate_id, attempts=attempt)
                     await _await_registered_signal_tasks(
                         assessment_id,
+                        candidate_id=candidate_id,
                         max_wait_seconds=max_wait_seconds,
                     )
-                    _set_analysis_state(assessment_id, "running", attempts=attempt)
+                    _set_analysis_state(assessment_id, "running", candidate_id=candidate_id, attempts=attempt)
                     await run_full_analysis_chained(
                         assessment_id=assessment_id,
                         job_requirements_id=job_requirements_id,
+                        candidate_id=candidate_id,
                         rebuild_from_responses=False,
                         max_wait_seconds=max_wait_seconds,
                     )
@@ -268,7 +307,7 @@ def schedule_final_analysis(
                         assessment_id,
                         attempt,
                     )
-                    _set_analysis_state(assessment_id, "completed", attempts=attempt)
+                    _set_analysis_state(assessment_id, "completed", candidate_id=candidate_id, attempts=attempt)
                     return
                 except Exception as exc:
                     logger.exception(
@@ -277,18 +316,30 @@ def schedule_final_analysis(
                         exc,
                     )
                     if attempt > retry_attempts:
-                        _set_analysis_state(assessment_id, "failed", attempts=attempt, error=str(exc))
+                        _set_analysis_state(
+                            assessment_id,
+                            "failed",
+                            candidate_id=candidate_id,
+                            attempts=attempt,
+                            error=str(exc),
+                        )
                         return
-                    _set_analysis_state(assessment_id, "pending", attempts=attempt, error=str(exc))
+                    _set_analysis_state(
+                        assessment_id,
+                        "pending",
+                        candidate_id=candidate_id,
+                        attempts=attempt,
+                        error=str(exc),
+                    )
                     await asyncio.sleep(retry_delay_seconds)
         finally:
-            _ANALYSIS_TASKS.pop(assessment_id, None)
+            _ANALYSIS_TASKS.pop(key, None)
 
     task = asyncio.create_task(
         _runner(),
-        name=f"final-analysis-{assessment_id}",
+        name=f"final-analysis-{assessment_id}-{candidate_id or 'assessment'}",
     )
-    _ANALYSIS_TASKS[assessment_id] = task
+    _ANALYSIS_TASKS[key] = task
     return True
 
 
@@ -366,6 +417,7 @@ async def write_segment(
     response_type: str,
     segment_text: str,
     sequence_order: int,
+    candidate_id: int | None = None,
     question_id: str | None = None,
 ) -> ResponseSegment:
     """
@@ -376,6 +428,7 @@ async def write_segment(
     """
     seg = ResponseSegment(
         assessment_id=assessment_id,
+        candidate_id=candidate_id,
         response_type=response_type,
         question_id=question_id,
         segment_text=segment_text,
@@ -391,7 +444,11 @@ async def write_segment(
     return seg
 
 
-async def rebuild_segments_and_signals_from_responses(assessment_id: int) -> tuple[int, int]:
+async def rebuild_segments_and_signals_from_responses(
+    assessment_id: int,
+    *,
+    candidate_id: int | None = None,
+) -> tuple[int, int]:
     """
     Rebuild canonical intelligence artifacts from finalized response fields.
 
@@ -409,7 +466,7 @@ async def rebuild_segments_and_signals_from_responses(assessment_id: int) -> tup
                 assessment_id,
             )
             return 0, 0
-        answer_payloads = iter_assessment_answers(db, assessment)
+        answer_payloads = iter_assessment_answers(db, assessment, candidate_id=candidate_id)
         if not any((payload.get("answer_text") or "").strip() for payload in answer_payloads):
             logger.warning(
                 "[intelligence] rebuild skipped: no saved answers for assessment_id=%s",
@@ -417,11 +474,15 @@ async def rebuild_segments_and_signals_from_responses(assessment_id: int) -> tup
             )
             return 0, 0
 
-        db.query(ResponseSignal).filter(
-            ResponseSignal.assessment_id == assessment_id
+        _apply_candidate_scope(
+            db.query(ResponseSignal).filter(ResponseSignal.assessment_id == assessment_id),
+            ResponseSignal,
+            candidate_id,
         ).delete(synchronize_session=False)
-        db.query(ResponseSegment).filter(
-            ResponseSegment.assessment_id == assessment_id
+        _apply_candidate_scope(
+            db.query(ResponseSegment).filter(ResponseSegment.assessment_id == assessment_id),
+            ResponseSegment,
+            candidate_id,
         ).delete(synchronize_session=False)
         db.flush()
 
@@ -435,6 +496,7 @@ async def rebuild_segments_and_signals_from_responses(assessment_id: int) -> tup
             response_type = payload["item_key"]
             seg = ResponseSegment(
                 assessment_id=assessment_id,
+                candidate_id=candidate_id,
                 response_type=response_type,
                 question_id=payload["item_key"],
                 segment_text=text,
@@ -456,6 +518,7 @@ async def rebuild_segments_and_signals_from_responses(assessment_id: int) -> tup
         sig = await extract_signals_for_segment(
             segment_id=seg_id,
             assessment_id=assessment_id,
+            candidate_id=candidate_id,
             response_type=response_type,
             segment_text=text,
         )
@@ -478,6 +541,7 @@ async def rebuild_segments_and_signals_from_responses(assessment_id: int) -> tup
 async def extract_signals_for_segment(
     segment_id: int,
     assessment_id: int,
+    candidate_id: int | None,
     response_type: str,
     segment_text: str,
 ) -> ResponseSignal | None:
@@ -598,6 +662,7 @@ async def extract_signals_for_segment(
         sig = ResponseSignal(
             response_segment_id=segment_id,
             assessment_id=assessment_id,
+            candidate_id=candidate_id,
             response_type=response_type,
             traits=payload.get("traits"),
             strengths=payload.get("strengths"),
@@ -632,7 +697,7 @@ async def extract_signals_for_segment(
 # 2C — Trait Aggregator
 # ---------------------------------------------------------------------------
 
-async def aggregate_traits_for_assessment(assessment_id: int) -> dict:
+async def aggregate_traits_for_assessment(assessment_id: int, *, candidate_id: int | None = None) -> dict:
     """
     Query all response_signals for this assessment and aggregate:
       - trait frequency and weighted confidence
@@ -645,8 +710,11 @@ async def aggregate_traits_for_assessment(assessment_id: int) -> dict:
     db = SessionLocal()
     try:
         signals = (
-            db.query(ResponseSignal)
-            .filter(ResponseSignal.assessment_id == assessment_id)
+            _apply_candidate_scope(
+                db.query(ResponseSignal).filter(ResponseSignal.assessment_id == assessment_id),
+                ResponseSignal,
+                candidate_id,
+            )
             .all()
         )
     finally:
@@ -883,7 +951,12 @@ async def _ensure_job_requirement_profile(job_requirements_id: int) -> JobRequir
 # 2E — Analysis Writer (full pipeline)
 # ---------------------------------------------------------------------------
 
-async def run_full_analysis(assessment_id: int, job_requirements_id: int) -> None:
+async def run_full_analysis(
+    assessment_id: int,
+    job_requirements_id: int,
+    *,
+    candidate_id: int | None = None,
+) -> None:
     """
     Orchestrate the full intelligence pipeline after an interview completes:
 
@@ -900,7 +973,7 @@ async def run_full_analysis(assessment_id: int, job_requirements_id: int) -> Non
 
     # Step 1 — aggregate
     logger.info("[intelligence] Step 1/5 aggregate_traits_for_assessment start (assessment_id=%s)", assessment_id)
-    aggregated_data = await aggregate_traits_for_assessment(assessment_id)
+    aggregated_data = await aggregate_traits_for_assessment(assessment_id, candidate_id=candidate_id)
     agg_traits = aggregated_data.get("aggregated_traits") or {}
     logger.info(
         "[intelligence] Step 1/5 aggregate_traits_for_assessment done (assessment_id=%s traits=%s)",
@@ -913,6 +986,7 @@ async def run_full_analysis(assessment_id: int, job_requirements_id: int) -> Non
     evaluation = await evaluate_assessment(
         assessment_id=assessment_id,
         job_requirements_id=job_requirements_id,
+        candidate_id=candidate_id,
         aggregated_data=aggregated_data,
         compare_traits_to_job_profile=compare_traits_to_job_profile,
         generate_narrative=_generate_narrative,
@@ -933,6 +1007,7 @@ async def run_full_analysis(assessment_id: int, job_requirements_id: int) -> Non
             db=db,
             assessment_id=assessment_id,
             job_requirements_id=job_requirements_id,
+            candidate_id=candidate_id,
             aggregated_data=aggregated_data,
             shared_result=evaluation.shared_result,
             type_result=evaluation.type_result,
@@ -955,6 +1030,7 @@ async def run_full_analysis_chained(
     assessment_id: int,
     job_requirements_id: int,
     *,
+    candidate_id: int | None = None,
     rebuild_from_responses: bool = False,
     grace_period_seconds: float = 3.0,
     max_wait_seconds: int = 60,
@@ -980,16 +1056,22 @@ async def run_full_analysis_chained(
         db = SessionLocal()
         try:
             seg_rows = (
-                db.query(ResponseSegment.id)
-                .filter(ResponseSegment.assessment_id == assessment_id)
+                _apply_candidate_scope(
+                    db.query(ResponseSegment.id).filter(ResponseSegment.assessment_id == assessment_id),
+                    ResponseSegment,
+                    candidate_id,
+                )
                 .all()
             )
             seg_ids = {r[0] for r in seg_rows}
             sig_segment_ids = (
-                db.query(ResponseSignal.response_segment_id)
-                .filter(
-                    ResponseSignal.assessment_id == assessment_id,
-                    ResponseSignal.response_segment_id.isnot(None),
+                _apply_candidate_scope(
+                    db.query(ResponseSignal.response_segment_id).filter(
+                        ResponseSignal.assessment_id == assessment_id,
+                        ResponseSignal.response_segment_id.isnot(None),
+                    ),
+                    ResponseSignal,
+                    candidate_id,
                 )
                 .distinct()
                 .all()
@@ -1001,7 +1083,8 @@ async def run_full_analysis_chained(
 
     if rebuild_from_responses:
         rebuilt_segments, rebuilt_signals = await rebuild_segments_and_signals_from_responses(
-            assessment_id
+            assessment_id,
+            candidate_id=candidate_id,
         )
         logger.info(
             "[intelligence] chained rebuild result (assessment_id=%s): segments=%s signals=%s",
@@ -1023,7 +1106,7 @@ async def run_full_analysis_chained(
             "Attempting bootstrap from legacy responses.",
             assessment_id,
         )
-        created = await _bootstrap_segments_from_legacy_responses(assessment_id)
+        created = await _bootstrap_segments_from_legacy_responses(assessment_id, candidate_id=candidate_id)
         if created > 0:
             logger.info(
                 "[intelligence] bootstrap created %s response_segments (assessment_id=%s)",
@@ -1068,6 +1151,7 @@ async def run_full_analysis_chained(
                     await extract_signals_for_segment(
                         segment_id=seg.id,
                         assessment_id=assessment_id,
+                        candidate_id=candidate_id,
                         response_type=seg.response_type,
                         segment_text=seg.segment_text,
                     )
@@ -1092,10 +1176,14 @@ async def run_full_analysis_chained(
         "[intelligence] chained starting run_full_analysis (assessment_id=%s)",
         assessment_id,
     )
-    await run_full_analysis(assessment_id, job_requirements_id)
+    await run_full_analysis(assessment_id, job_requirements_id, candidate_id=candidate_id)
 
 
-async def _bootstrap_segments_from_legacy_responses(assessment_id: int) -> int:
+async def _bootstrap_segments_from_legacy_responses(
+    assessment_id: int,
+    *,
+    candidate_id: int | None = None,
+) -> int:
     """
     Create response_segments from existing Responses.*_response text for assessments
     created before granular segment capture was enabled.
@@ -1104,8 +1192,11 @@ async def _bootstrap_segments_from_legacy_responses(assessment_id: int) -> int:
     try:
         # Avoid duplicating bootstrap if segments already exist.
         existing = (
-            db.query(ResponseSegment.id)
-            .filter(ResponseSegment.assessment_id == assessment_id)
+            _apply_candidate_scope(
+                db.query(ResponseSegment.id).filter(ResponseSegment.assessment_id == assessment_id),
+                ResponseSegment,
+                candidate_id,
+            )
             .first()
         )
         if existing:
@@ -1114,7 +1205,7 @@ async def _bootstrap_segments_from_legacy_responses(assessment_id: int) -> int:
         assessment = db.get(Assessments, assessment_id)
         if not assessment:
             return 0
-        answer_payloads = iter_assessment_answers(db, assessment)
+        answer_payloads = iter_assessment_answers(db, assessment, candidate_id=candidate_id)
 
         created = 0
         sequence_order = 0
@@ -1129,6 +1220,7 @@ async def _bootstrap_segments_from_legacy_responses(assessment_id: int) -> int:
                 sequence_order += 1
                 seg = ResponseSegment(
                     assessment_id=assessment_id,
+                    candidate_id=candidate_id,
                     response_type=response_type,
                     question_id=payload["item_key"],
                     segment_text=chunk,
@@ -1222,6 +1314,7 @@ def _upsert_analysis(
     db,
     assessment_id: int,
     job_requirements_id: int,
+    candidate_id: int | None,
     aggregated_data: dict,
     shared_result: dict,
     type_result: dict,
@@ -1229,11 +1322,11 @@ def _upsert_analysis(
     prediction_text: str,
 ) -> None:
     """Write or update the Analysis and Predictions rows for this assessment."""
-    analysis_row = (
-        db.query(Analysis)
-        .filter(Analysis.assessment_id == assessment_id)
-        .first()
-    )
+    analysis_row = _apply_candidate_scope(
+        db.query(Analysis).filter(Analysis.assessment_id == assessment_id),
+        Analysis,
+        candidate_id,
+    ).first()
 
     agg_traits = aggregated_data.get("aggregated_traits")
     consistency = aggregated_data.get("consistency_scores")
@@ -1242,7 +1335,7 @@ def _upsert_analysis(
     trait_gaps = shared_result.get("trait_gaps")
 
     if analysis_row is None:
-        responses_row = ensure_responses_row(db, assessment_id)
+        responses_row = ensure_responses_row(db, assessment_id, candidate_id=candidate_id)
         responses_id = responses_row.id
         logger.info(
             "[intelligence] _upsert_analysis creating Analysis (assessment_id=%s responses_id=%s)",
@@ -1251,6 +1344,7 @@ def _upsert_analysis(
         )
         analysis_row = Analysis(
             assessment_id=assessment_id,
+            candidate_id=candidate_id,
             job_requirements_id=job_requirements_id,
             responses_id=responses_id,
             analysis=narrative,
@@ -1314,13 +1408,17 @@ def _upsert_analysis(
         pred_row.risk_flags = risk_flags
 
     result_row = (
-        db.query(AssessmentResult)
-        .filter(AssessmentResult.assessment_id == assessment_id)
+        _apply_candidate_scope(
+            db.query(AssessmentResult).filter(AssessmentResult.assessment_id == assessment_id),
+            AssessmentResult,
+            candidate_id,
+        )
         .first()
     )
     if result_row is None:
         result_row = AssessmentResult(
             assessment_id=assessment_id,
+            candidate_id=candidate_id,
             shared_result_json=shared_result,
             type_result_json=type_result,
             narrative=narrative,

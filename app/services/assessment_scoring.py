@@ -27,6 +27,7 @@ async def evaluate_assessment(
     *,
     assessment_id: int,
     job_requirements_id: int,
+    candidate_id: int | None,
     aggregated_data: dict,
     compare_traits_to_job_profile,
     generate_narrative,
@@ -39,7 +40,7 @@ async def evaluate_assessment(
         if assessment is None:
             raise RuntimeError(f"Assessment {assessment_id} not found")
         definition = get_assessment_definition(assessment.assessment_type_code)
-        answers = iter_assessment_answers(db, assessment)
+        answers = iter_assessment_answers(db, assessment, candidate_id=candidate_id)
         answer_block = _build_answer_block(answers)
     finally:
         db.close()

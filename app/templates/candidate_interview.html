@@ -65,6 +65,13 @@
     }
     button.primary { background: var(--accent); color: #0f0f12; }
     button.primary:hover { background: var(--accent-hover); }
+    button.secondary {
+      background: var(--surface-alt);
+      color: var(--text);
+      border: 1px solid var(--border);
+      margin-left: 0.75rem;
+    }
+    button.secondary:hover { background: #2a2a32; }
     button.danger { background: rgba(224,124,124,0.16); color: var(--danger); }
     .hint { color: var(--muted); font-size: 0.9rem; line-height: 1.5; margin-top: 0.9rem; }
     .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
@@ -102,6 +109,7 @@
       <p class="sub">Use the button below to start your one-time interview session. When the interview ends, your analysis and recommendation will appear here automatically.</p>
       <div id="status" class="status">Preparing interview session…</div>
       <button id="btn" class="primary">Start Interview</button>
+      <button id="restartBtn" class="secondary" type="button">Start Over</button>
       <p class="hint">Allow microphone access. After the connection is established, answer each question naturally and wait for the next one.</p>
     </section>
 
@@ -142,6 +150,7 @@
     (function () {
       const statusEl = document.getElementById("status");
       const btn = document.getElementById("btn");
+      const restartBtn = document.getElementById("restartBtn");
       const resultsEl = document.getElementById("results");
       const metricStatusEl = document.getElementById("metric-status");
       const metricFitEl = document.getElementById("metric-fit");
@@ -265,6 +274,12 @@
         }
         if (stream) stream.getTracks().forEach((track) => track.stop());
         stream = null;
+        if (audioContext) {
+          try { audioContext.close(); } catch (_) {}
+        }
+        if (playbackContext) {
+          try { playbackContext.close(); } catch (_) {}
+        }
         audioContext = null;
         playbackContext = null;
       }
@@ -521,12 +536,53 @@
         stopCapture();
       }
 
+      async function startOver() {
+        const confirmed = window.confirm("Start over and clear all saved answers for this interview?");
+        if (!confirmed) return;
+
+        disconnect();
+        setStatus("processing", "Resetting interview state…");
+        try {
+          const response = await fetch("/candidate/assessment/" + assessmentId + "/reset", {
+            method: "POST",
+            credentials: "same-origin",
+          });
+          if (!response.ok) {
+            const payload = await response.json().catch(function () { return {}; });
+            throw new Error(payload.detail || "Could not reset this interview.");
+          }
+          interviewComplete = false;
+          userDisconnected = false;
+          hadInterviewConnection = false;
+          reconnectAttempts = 0;
+          nextPlayTime = 0;
+          clearPollingTimer();
+          resultsEl.classList.add("hidden");
+          metricStatusEl.textContent = "READY";
+          resetPendingResultCopy();
+          setStatus("connected", "Saved interview state cleared. Click Start Interview to begin again.");
+        } catch (error) {
+          setStatus("error", (error && error.message) || "Could not reset this interview.");
+        }
+      }
+
       btn.addEventListener("click", function () {
         if (ws && ws.readyState === WebSocket.OPEN) {
           disconnect();
         } else {
           connect(false);
         }
+      });
+      restartBtn.addEventListener("click", startOver);
+      window.addEventListener("pagehide", function () {
+        userDisconnected = true;
+        clearReconnectTimer();
+        clearPollingTimer();
+        if (ws) {
+          try { ws.close(); } catch (_) {}
+          ws = null;
+        }
+        stopCapture();
       });
 
       resetPendingResultCopy();

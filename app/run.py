@@ -10,7 +10,7 @@ if _ROOT not in (Path(p).resolve() for p in sys.path):
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
@@ -27,6 +27,8 @@ logging.basicConfig(
 from app.as_requirements.routes.ai_analysis import router as job_requirements_router
 from app.as_blueprinting.routes.assessment import router as assessments_router
 from app.as_analysis.routes.analysis import router as analysis_router
+from app.auth.candidate_access import CANDIDATE_ACCESS_COOKIE_NAME
+from app.auth.login.deps import ACCESS_TOKEN_COOKIE_NAME
 from app.auth.router import router as auth_router
 from app.auth.login.deps import require_authenticated_user
 from app.agent.routes import router as agent_router
@@ -97,11 +99,15 @@ def serve_test_pipeline():
 
 
 @app.get("/auth/login")
-def serve_login_page():
+def serve_login_page(request: Request):
     """Serve the login UI."""
     path = Path(__file__).resolve().parent / "templates" / "auth_login.html"
     content = path.read_text(encoding="utf-8")
-    return HTMLResponse(content, headers={"Cache-Control": "no-store"})
+    response = HTMLResponse(content, headers={"Cache-Control": "no-store"})
+    if request.query_params.get("switch") in {"1", "true", "yes"}:
+        response.delete_cookie(key=ACCESS_TOKEN_COOKIE_NAME, path="/")
+        response.delete_cookie(key=CANDIDATE_ACCESS_COOKIE_NAME, path="/")
+    return response
 
 
 @app.get("/auth/signup")

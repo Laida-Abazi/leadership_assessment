@@ -628,7 +628,6 @@
   </section>
 
   <script>
-    const ACCESS_TOKEN_KEY = "access_token";
     (function clearForeignStorageKeys() {
       const keysToRemove = [];
       for (let i = 0; i < localStorage.length; i++) {
@@ -637,47 +636,34 @@
       }
       keysToRemove.forEach((key) => localStorage.removeItem(key));
     })();
-
-    function getTokenPayload(token) {
-      try {
-        const payload = token.split(".")[1];
-        return JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
-      } catch (_) {
-        return null;
-      }
-    }
-
-    function isTokenValid(token) {
-      if (!token) return false;
-      const payload = getTokenPayload(token);
-      if (!payload || !payload.exp) return false;
-      return (payload.exp * 1000) > Date.now();
-    }
+    localStorage.removeItem("access_token");
 
     function redirectToLogin() {
       const next = window.location.pathname + window.location.search;
       window.location.replace("/auth/login?next=" + encodeURIComponent(next));
     }
 
-    function getAccessTokenOrRedirect() {
-      const token = localStorage.getItem(ACCESS_TOKEN_KEY);
-      if (!isTokenValid(token)) {
-        localStorage.removeItem(ACCESS_TOKEN_KEY);
+    async function hydrateCurrentUser() {
+      const response = await fetch("/auth/me", { credentials: "same-origin" });
+      if (response.status === 401 || response.status === 403) {
         redirectToLogin();
-        return null;
+        throw new Error("Authentication required.");
       }
-      return token;
+      if (!response.ok) {
+        throw new Error("Unable to load the current user.");
+      }
+      const user = await response.json();
+      state.currentUserId = user.id;
+      document.getElementById("userId").value = String(user.id);
+      document.getElementById("userIdMbti").value = String(user.id);
+      document.getElementById("userId").readOnly = true;
+      document.getElementById("userIdMbti").readOnly = true;
     }
 
     async function apiFetch(url, options) {
-      const token = getAccessTokenOrRedirect();
-      if (!token) throw new Error("Authentication required.");
       const reqOptions = options || {};
-      const headers = new Headers(reqOptions.headers || {});
-      headers.set("Authorization", "Bearer " + token);
-      const res = await fetch(url, { ...reqOptions, headers });
+      const res = await fetch(url, { ...reqOptions, credentials: "same-origin" });
       if (res.status === 401 || res.status === 403) {
-        localStorage.removeItem(ACCESS_TOKEN_KEY);
         redirectToLogin();
         throw new Error("Session expired. Redirecting to login...");
       }
@@ -691,6 +677,7 @@
       assessmentTypeCode: null,
       mbtiBootstrapJobRequirementsId: null,
       latestInterviewLink: null,
+      currentUserId: null,
     };
 
     const MBTI_BOOTSTRAP_JOB_DESCRIPTION = [
@@ -1386,8 +1373,13 @@
       return html;
     }
 
-    (function init() {
-      if (!getAccessTokenOrRedirect()) return;
+    (async function init() {
+      try {
+        await hydrateCurrentUser();
+      } catch (_) {
+        return;
+      }
+
       const params = new URLSearchParams(window.location.search);
       const code = params.get("assessment");
       if (code && ASSESSMENT_CONFIGS[code]) {

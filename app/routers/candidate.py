@@ -26,11 +26,23 @@ from app.services.assessment_candidates import (
     refresh_candidate_result_snapshots,
     register_candidate_for_link,
 )
+from app.services.assessment_persistence import clear_assessment_interview_state
 from app.services.interview_links import (
     enforce_link_open_rate_limit,
 )
 
 router = APIRouter(prefix="/candidate", tags=["candidate"])
+
+
+def _get_candidate_for_link(db: Session, link_id: int) -> AssessmentCandidate:
+    candidate = (
+        db.query(AssessmentCandidate)
+        .filter(AssessmentCandidate.access_link_id == link_id)
+        .first()
+    )
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found for this interview session.")
+    return candidate
 
 
 @router.get("/interview/session", response_class=FileResponse)
@@ -106,10 +118,27 @@ def begin_candidate_interview(
 @router.get("/assessment/{assessment_id}/status")
 def get_candidate_status(
     assessment_id: int,
-    _: object = Depends(require_candidate_assessment_access),
+    context: CandidateAccessContext = Depends(require_candidate_assessment_access),
     db: Session = Depends(get_db),
 ):
-    return build_status_response(db, assessment_id)
+    candidate = _get_candidate_for_link(db, context.link_id)
+    return build_status_response(db, assessment_id, candidate_id=candidate.id)
+
+
+@router.post("/assessment/{assessment_id}/reset")
+def reset_candidate_assessment_session(
+    assessment_id: int,
+    context: CandidateAccessContext = Depends(require_candidate_assessment_access),
+    db: Session = Depends(get_db),
+):
+    candidate = _get_candidate_for_link(db, context.link_id)
+    deleted = clear_assessment_interview_state(assessment_id, candidate_id=candidate.id)
+    return {
+        "status": "ok",
+        "assessment_id": assessment_id,
+        "candidate_id": candidate.id,
+        "deleted": deleted,
+    }
 
 
 @router.get("/assessment/{assessment_id}/analysis")
@@ -118,13 +147,9 @@ def get_candidate_analysis(
     context: CandidateAccessContext = Depends(require_candidate_assessment_access),
     db: Session = Depends(get_db),
 ):
-    candidates = (
-        db.query(AssessmentCandidate)
-        .filter(AssessmentCandidate.access_link_id == context.link_id)
-        .all()
-    )
-    refresh_candidate_result_snapshots(db, candidates)
-    return build_analysis_response(db, assessment_id)
+    candidate = _get_candidate_for_link(db, context.link_id)
+    refresh_candidate_result_snapshots(db, [candidate])
+    return build_analysis_response(db, assessment_id, candidate_id=candidate.id)
 
 
 @router.get("/assessment/{assessment_id}/predictions")
@@ -133,10 +158,6 @@ def get_candidate_predictions(
     context: CandidateAccessContext = Depends(require_candidate_assessment_access),
     db: Session = Depends(get_db),
 ):
-    candidates = (
-        db.query(AssessmentCandidate)
-        .filter(AssessmentCandidate.access_link_id == context.link_id)
-        .all()
-    )
-    refresh_candidate_result_snapshots(db, candidates)
-    return build_predictions_response(db, assessment_id)
+    candidate = _get_candidate_for_link(db, context.link_id)
+    refresh_candidate_result_snapshots(db, [candidate])
+    return build_predictions_response(db, assessment_id, candidate_id=candidate.id)

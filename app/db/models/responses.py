@@ -9,6 +9,7 @@ class Responses(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     assessment_id = Column(Integer, ForeignKey("assessments.id"), nullable=False)
+    candidate_id = Column(Integer, ForeignKey("assessment_candidates.id", ondelete="CASCADE"), nullable=True, index=True)
     behavioral_response = Column(Text, nullable=True)
     competency_based_response = Column(Text, nullable=True)
     situational_response = Column(Text, nullable=True)
@@ -22,4 +23,5 @@ class Responses(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     assessment = relationship("Assessments", back_populates="responses")
+    candidate = relationship("AssessmentCandidate", back_populates="responses")
     analyses = relationship("Analysis", back_populates="responses")

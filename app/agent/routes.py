@@ -13,15 +13,16 @@ from pathlib import Path
 from typing import Optional
 
 import websockets.exceptions
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
 from app.auth.candidate_access import CANDIDATE_ACCESS_COOKIE_NAME, get_candidate_access_context
-from app.auth.login.deps import get_current_user_id
+from app.auth.login.deps import get_current_user_id, require_authenticated_user
 from app.as_requirements.config.models_setup import MODEL_MINI, get_openai_client
 from app.db import SessionLocal
-from app.db.models import Assessments, ResponseSegment, User
+from app.db.models import AssessmentCandidate, Assessments, ResponseSegment, User
 from app.services.assessment_persistence import (
+    clear_assessment_interview_state,
     count_saved_answers,
     ensure_responses_row_for_assessment,
     get_assessment_item_payloads,
@@ -32,6 +33,30 @@ from app.services.assessment_registry import get_assessment_definition
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["agent"])
+
+@router.post("/assessment/{assessment_id}/reset")
+def reset_admin_assessment_session(
+    assessment_id: int,
+    user: User = Depends(require_authenticated_user),
+):
+    db = SessionLocal()
+    try:
+        assessment = db.get(Assessments, assessment_id)
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found.")
+        if assessment.user_id != user.id:
+            raise HTTPException(status_code=403, detail="You can only reset your own assessments.")
+    finally:
+        db.close()
+
+    deleted = clear_assessment_interview_state(assessment_id)
+    return {
+        "status": "ok",
+        "assessment_id": assessment_id,
+        "candidate_id": None,
+        "deleted": deleted,
+    }
+
 
 # Gemini Live model for native audio (voice) conversation.
 LIVE_MODEL = os.environ.get(
@@ -101,12 +126,20 @@ def _response_fields_for_assessment(assessment: Assessments, db=None) -> list[st
             db.close()
 
 
-def _save_response(assessment_id: int, item_key: str, answer_text: str, question_text: str | None = None) -> bool:
+def _save_response(
+    assessment_id: int,
+    item_key: str,
+    answer_text: str,
+    question_text: str | None = None,
+    *,
+    candidate_id: int | None = None,
+) -> bool:
     """Upsert the given answer into canonical assessment_answers and legacy rows when possible."""
     ok = save_assessment_answer(
         assessment_id=assessment_id,
         item_key=item_key,
         answer_text=answer_text,
+        candidate_id=candidate_id,
         question_text=question_text,
     )
     if ok:
@@ -123,15 +156,20 @@ def _save_response(assessment_id: int, item_key: str, answer_text: str, question
     return ok
 
 
-def _ensure_responses_row(assessment_id: int) -> None:
+def _ensure_responses_row(assessment_id: int, *, candidate_id: int | None = None) -> None:
     """Ensure a compatibility Responses row exists for this assessment_id."""
-    ensure_responses_row_for_assessment(assessment_id)
+    ensure_responses_row_for_assessment(assessment_id, candidate_id=candidate_id)
     logger.info("Ensured Responses row for assessment_id=%s", assessment_id)
 
 
-def _count_saved_responses(assessment_id: int, response_fields: list[str]) -> int:
+def _count_saved_responses(
+    assessment_id: int,
+    response_fields: list[str],
+    *,
+    candidate_id: int | None = None,
+) -> int:
     """Return the number of leading ordered answers already captured for reconnect flow."""
-    return count_saved_answers(assessment_id, response_fields)
+    return count_saved_answers(assessment_id, response_fields, candidate_id=candidate_id)
 
 
 def _build_interview_system_instruction(
@@ -408,13 +446,14 @@ async def agent_websocket(websocket: WebSocket):
 
     db_auth = SessionLocal()
     candidate_context = None
+    admin_user_id: int | None = None
     try:
         try:
             if candidate_token:
                 candidate_context = get_candidate_access_context(websocket)
             else:
-                user_id = get_current_user_id(websocket)
-                user = db_auth.get(User, user_id)
+                admin_user_id = get_current_user_id(websocket)
+                user = db_auth.get(User, admin_user_id)
                 if not user or not user.is_verified:
                     await websocket.close(code=1008, reason="Authentication required.")
                     return
@@ -459,6 +498,7 @@ async def agent_websocket(websocket: WebSocket):
     response_fields: list[str] = []   # column names, parallel to `questions`
     questions: list[str] = []
     candidate_name: str | None = None
+    candidate_id: int | None = None
     assessment_label = "Leadership Core"
     assessment_brief: str | None = None
     already_saved = 0                 # questions answered in a previous session
@@ -470,7 +510,24 @@ async def agent_websocket(websocket: WebSocket):
             assessment = db.get(Assessments, assessment_id)
             if assessment:
                 logger.info("[%s] Assessment found: id=%s user_id=%s", session_id, assessment_id, assessment.user_id)
-                if not candidate_context:
+                if candidate_context:
+                    candidate = (
+                        db.query(AssessmentCandidate)
+                        .filter(
+                            AssessmentCandidate.access_link_id == candidate_context.link_id,
+                            AssessmentCandidate.assessment_id == assessment_id,
+                        )
+                        .first()
+                    )
+                    if not candidate:
+                        await websocket.close(code=1008, reason="Candidate session is missing a candidate record.")
+                        return
+                    candidate_id = candidate.id
+                    candidate_name = f"{candidate.first_name} {candidate.last_name}".strip() or None
+                else:
+                    if admin_user_id is None or assessment.user_id != admin_user_id:
+                        await websocket.close(code=1008, reason="You do not have access to this assessment.")
+                        return
                     user = db.get(User, assessment.user_id)
                     if user:
                         candidate_name = (
@@ -496,10 +553,14 @@ async def agent_websocket(websocket: WebSocket):
                     len(questions),
                     response_fields,
                 )
-                already_saved = _count_saved_responses(assessment_id, response_fields)
+                already_saved = _count_saved_responses(
+                    assessment_id,
+                    response_fields,
+                    candidate_id=candidate_id,
+                )
                 if response_fields:
                     # Create the row early so the assessment_id exists in Responses even before a "long enough" answer.
-                    _ensure_responses_row(assessment_id)
+                    _ensure_responses_row(assessment_id, candidate_id=candidate_id)
                 logger.info(
                     "[%s] Assessment ready: id=%s total_questions=%s already_saved=%s",
                     session_id,
@@ -610,7 +671,11 @@ async def agent_websocket(websocket: WebSocket):
         ):
             return False
 
-        saved_answers = _count_saved_responses(assessment_id, response_fields)
+        saved_answers = _count_saved_responses(
+            assessment_id,
+            response_fields,
+            candidate_id=candidate_id,
+        )
         if (
             state.get("current_question_finalized")
             and 0 <= state.get("current_q", -1) < len(response_fields)
@@ -635,6 +700,7 @@ async def agent_websocket(websocket: WebSocket):
         scheduled = schedule_final_analysis(
             assessment_id=assessment_id,
             job_requirements_id=job_requirements_id,
+            candidate_id=candidate_id,
         )
         logger.info(
             "[%s] Final analysis readiness reached: reason=%s assessment_id=%s scheduled=%s saved=%s total=%s",
@@ -760,7 +826,13 @@ async def agent_websocket(websocket: WebSocket):
             len(text),
         )
         current_question_text = questions[idx] if idx < len(questions) else None
-        ok = _save_response(assessment_id, response_fields[idx], text, current_question_text)  # type: ignore[arg-type]
+        ok = _save_response(
+            assessment_id,
+            response_fields[idx],
+            text,
+            current_question_text,
+            candidate_id=candidate_id,
+        )  # type: ignore[arg-type]
         if ok:
             state["last_persisted"] = text
             logger.info("[%s] Persist OK: q=%s field=%s", session_id, idx + 1, response_fields[idx])
@@ -800,10 +872,20 @@ async def agent_websocket(websocket: WebSocket):
         db = SessionLocal()
         try:
             seg = await write_segment(
-                db, assessment_id, response_type, segment_text, sequence_order, question_id=question_id
+                db,
+                assessment_id,
+                response_type,
+                segment_text,
+                sequence_order,
+                candidate_id=candidate_id,
+                question_id=question_id,
             )
             await extract_signals_for_segment(
-                seg.id, assessment_id, response_type, segment_text
+                seg.id,
+                assessment_id,
+                candidate_id,
+                response_type,
+                segment_text,
             )
         except Exception as exc:
             logger.exception("[%s] Segment write/extract failed: %s", session_id, exc)
@@ -870,7 +952,7 @@ async def agent_websocket(websocket: WebSocket):
             name="segment-extract-final",
         )
         from app.services.intelligence import register_signal_task
-        register_signal_task(assessment_id, task)
+        register_signal_task(assessment_id, task, candidate_id=candidate_id)
         state["current_question_finalized"] = True
         state["transcript_since_last_segment"] = ""
         _schedule_final_analysis_if_ready(reason)

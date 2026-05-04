@@ -231,6 +231,35 @@ def test_schedule_final_analysis_retries_once_and_completes(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_schedule_final_analysis_tracks_candidate_specific_scope(monkeypatch):
+    intelligence._ANALYSIS_TASKS.clear()
+    intelligence._ANALYSIS_STATE.clear()
+
+    async def fake_wait(*args, **kwargs):
+        return None
+
+    async def fake_run(**kwargs):
+        assert kwargs["candidate_id"] == 5
+
+    monkeypatch.setattr(intelligence, "_await_registered_signal_tasks", fake_wait)
+    monkeypatch.setattr(intelligence, "run_full_analysis_chained", fake_run)
+
+    async def scenario():
+        scheduled = intelligence.schedule_final_analysis(
+            assessment_id=1,
+            job_requirements_id=2,
+            candidate_id=5,
+            retry_attempts=0,
+            retry_delay_seconds=0,
+        )
+        assert scheduled is True
+        await intelligence._ANALYSIS_TASKS[(1, 5)]
+        assert intelligence._ANALYSIS_STATE[(1, 5)]["status"] == "completed"
+        assert intelligence._ANALYSIS_STATE[(1, 5)]["candidate_id"] == 5
+
+    asyncio.run(scenario())
+
+
 def test_schedule_final_analysis_marks_failed_after_exhausting_retries(monkeypatch):
     intelligence._ANALYSIS_TASKS.clear()
     intelligence._ANALYSIS_STATE.clear()

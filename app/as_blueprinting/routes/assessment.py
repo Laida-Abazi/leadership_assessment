@@ -20,7 +20,10 @@ from app.services.assessment_registry import (
     ensure_assessment_types_seeded,
     get_assessment_definition,
 )
-from app.services.assessment_candidates import refresh_candidate_result_snapshots, serialize_candidate
+from app.services.assessment_candidates import (
+    refresh_candidate_result_snapshots,
+    serialize_candidate,
+)
 from app.services.interview_links import (
     get_latest_assessment_access_link,
     issue_assessment_access_link,
@@ -135,6 +138,15 @@ def save_assessment(
     return row
 
 
+def _require_owned_assessment(db: Session, assessment_id: int, current_user_id: int) -> Assessments:
+    assessment = db.get(Assessments, assessment_id)
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    if assessment.user_id != current_user_id:
+        raise HTTPException(status_code=403, detail="You can only access your own assessments.")
+    return assessment
+
+
 @router.post("/generate", response_model=AssessmentQuestionOut)
 def generate_and_save_assessments(
     body: GenerateAssessmentsRequest,
@@ -143,6 +155,8 @@ def generate_and_save_assessments(
     current_user_id: int = Depends(get_current_user_id),
 ):
     """Generate an assessment instance from a reusable assessment type definition."""
+    if body.user_id != current_user_id:
+        raise HTTPException(status_code=403, detail="Assessments can only be generated for the authenticated user.")
     job = db.get(JobRequirements, body.job_requirements_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job requirements not found")
@@ -151,7 +165,7 @@ def generate_and_save_assessments(
     items = build_assessment_items(definition, job=job)
     assessment = save_assessment(
         db,
-        user_id=body.user_id,
+        user_id=current_user_id,
         job_requirements_id=body.job_requirements_id,
         assessment_type_code=definition.code,
         assessment_version=definition.version,
@@ -198,6 +212,8 @@ def generate_assessment_from_linkedin_job(
     current_user_id: int = Depends(get_current_user_id),
 ):
     """Fetch a LinkedIn job post via Bright Data and generate an assessment from it."""
+    if body.user_id != current_user_id:
+        raise HTTPException(status_code=403, detail="Assessments can only be generated for the authenticated user.")
     try:
         posting = fetch_linkedin_job_posting(body.linkedin_job_url)
     except BrightDataError as exc:
@@ -213,7 +229,7 @@ def generate_assessment_from_linkedin_job(
     items = build_assessment_items(definition, job=job)
     assessment = save_assessment(
         db,
-        user_id=body.user_id,
+        user_id=current_user_id,
         job_requirements_id=job.id,
         assessment_type_code=definition.code,
         assessment_version=definition.version,
@@ -260,9 +276,7 @@ def issue_invite_link(
     db: Session = Depends(get_db),
     current_user_id: int = Depends(get_current_user_id),
 ):
-    assessment = db.get(Assessments, assessment_id)
-    if not assessment:
-        raise HTTPException(status_code=404, detail="Assessment not found")
+    _require_owned_assessment(db, assessment_id, current_user_id)
     link, raw_token = issue_assessment_access_link(
         db,
         assessment_id=assessment_id,
@@ -284,10 +298,9 @@ def issue_invite_link(
 def revoke_invite_link(
     assessment_id: int,
     db: Session = Depends(get_db),
+    current_user_id: int = Depends(get_current_user_id),
 ):
-    assessment = db.get(Assessments, assessment_id)
-    if not assessment:
-        raise HTTPException(status_code=404, detail="Assessment not found")
+    _require_owned_assessment(db, assessment_id, current_user_id)
     link = get_latest_assessment_access_link(db, assessment_id)
     if not link:
         raise HTTPException(status_code=404, detail="No interview link found for this assessment.")
@@ -299,10 +312,9 @@ def revoke_invite_link(
 def get_invite_link_status(
     assessment_id: int,
     db: Session = Depends(get_db),
+    current_user_id: int = Depends(get_current_user_id),
 ):
-    assessment = db.get(Assessments, assessment_id)
-    if not assessment:
-        raise HTTPException(status_code=404, detail="Assessment not found")
+    _require_owned_assessment(db, assessment_id, current_user_id)
     link = get_latest_assessment_access_link(db, assessment_id)
     if not link:
         raise HTTPException(status_code=404, detail="No interview link found for this assessment.")

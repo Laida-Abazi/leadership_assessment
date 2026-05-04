@@ -5,7 +5,18 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
-from app.db.models import AssessmentAnswer, AssessmentItem, Assessments, Responses
+from app.db.models import (
+    Analysis,
+    AssessmentAnswer,
+    AssessmentCandidate,
+    AssessmentItem,
+    AssessmentResult,
+    Assessments,
+    Predictions,
+    ResponseSegment,
+    ResponseSignal,
+    Responses,
+)
 from app.services.assessment_registry import (
     LEADERSHIP_ITEM_TEMPLATES,
     build_assessment_items,
@@ -19,19 +30,19 @@ LEGACY_RESPONSE_FIELD_BY_ITEM_KEY = {
 }
 
 
-def ensure_responses_row(db: Session, assessment_id: int) -> Responses:
-    row = db.query(Responses).filter(Responses.assessment_id == assessment_id).first()
+def ensure_responses_row(db: Session, assessment_id: int, candidate_id: int | None = None) -> Responses:
+    row = _query_scoped_responses(db, assessment_id=assessment_id, candidate_id=candidate_id).first()
     if row is None:
-        row = Responses(assessment_id=assessment_id)
+        row = Responses(assessment_id=assessment_id, candidate_id=candidate_id)
         db.add(row)
         db.flush()
     return row
 
 
-def ensure_responses_row_for_assessment(assessment_id: int) -> None:
+def ensure_responses_row_for_assessment(assessment_id: int, candidate_id: int | None = None) -> None:
     db = SessionLocal()
     try:
-        ensure_responses_row(db, assessment_id)
+        ensure_responses_row(db, assessment_id, candidate_id=candidate_id)
         db.commit()
     finally:
         db.close()
@@ -129,6 +140,7 @@ def save_assessment_answer(
     item_key: str,
     answer_text: str,
     *,
+    candidate_id: int | None = None,
     question_text: str | None = None,
     answer_meta: dict | None = None,
 ) -> bool:
@@ -137,21 +149,23 @@ def save_assessment_answer(
         assessment = db.get(Assessments, assessment_id)
         if assessment is None:
             return False
+        if candidate_id is not None:
+            candidate = db.get(AssessmentCandidate, candidate_id)
+            if candidate is None or candidate.assessment_id != assessment_id:
+                return False
 
         items = get_assessment_items(db, assessment)
         item = next((row for row in items if row.item_key == item_key), None)
-        row = (
-            db.query(AssessmentAnswer)
-            .filter(
-                AssessmentAnswer.assessment_id == assessment_id,
-                AssessmentAnswer.item_key == item_key,
-            )
-            .first()
-        )
+        row = _query_scoped_answers(
+            db,
+            assessment_id=assessment_id,
+            candidate_id=candidate_id,
+        ).filter(AssessmentAnswer.item_key == item_key).first()
         clean_answer = (answer_text or "").strip() or None
         if row is None:
             row = AssessmentAnswer(
                 assessment_id=assessment_id,
+                candidate_id=candidate_id,
                 assessment_item_id=item.id if item else None,
                 item_key=item_key,
                 question_text=question_text or (item.prompt_text if item else None),
@@ -168,11 +182,11 @@ def save_assessment_answer(
         # Compatibility bridge for the original leadership assessment schema.
         legacy_field = LEGACY_RESPONSE_FIELD_BY_ITEM_KEY.get(item_key)
         if legacy_field:
-            legacy_row = ensure_responses_row(db, assessment_id)
+            legacy_row = ensure_responses_row(db, assessment_id, candidate_id=candidate_id)
             if hasattr(legacy_row, legacy_field):
                 setattr(legacy_row, legacy_field, clean_answer)
         else:
-            ensure_responses_row(db, assessment_id)
+            ensure_responses_row(db, assessment_id, candidate_id=candidate_id)
 
         db.commit()
         return True
@@ -183,16 +197,27 @@ def save_assessment_answer(
         db.close()
 
 
-def count_saved_answers(assessment_id: int, ordered_item_keys: list[str]) -> int:
+def count_saved_answers(
+    assessment_id: int,
+    ordered_item_keys: list[str],
+    *,
+    candidate_id: int | None = None,
+) -> int:
     db = SessionLocal()
     try:
         canonical_answers = {
             row.item_key: row.answer_text
-            for row in db.query(AssessmentAnswer)
-            .filter(AssessmentAnswer.assessment_id == assessment_id)
-            .all()
+            for row in _query_scoped_answers(
+                db,
+                assessment_id=assessment_id,
+                candidate_id=candidate_id,
+            ).all()
         }
-        legacy_row = db.query(Responses).filter(Responses.assessment_id == assessment_id).first()
+        legacy_row = _query_scoped_responses(
+            db,
+            assessment_id=assessment_id,
+            candidate_id=candidate_id,
+        ).first()
         count = 0
         for item_key in ordered_item_keys:
             answer_text = canonical_answers.get(item_key)
@@ -209,15 +234,109 @@ def count_saved_answers(assessment_id: int, ordered_item_keys: list[str]) -> int
         db.close()
 
 
-def iter_assessment_answers(db: Session, assessment: Assessments) -> list[dict[str, Any]]:
+def clear_assessment_interview_state(
+    assessment_id: int,
+    *,
+    candidate_id: int | None = None,
+) -> dict[str, int]:
+    """Delete persisted interview artifacts for one assessment scope."""
+    from app.services.intelligence import reset_intelligence_scope
+
+    reset_intelligence_scope(assessment_id, candidate_id=candidate_id)
+    db = SessionLocal()
+    try:
+        analysis_rows = (
+            _query_scoped_analysis(db, assessment_id=assessment_id, candidate_id=candidate_id)
+            .all()
+        )
+        analysis_ids = [row.id for row in analysis_rows]
+
+        deleted_predictions = 0
+        if analysis_ids:
+            deleted_predictions = (
+                db.query(Predictions)
+                .filter(Predictions.analysis_id.in_(analysis_ids))
+                .delete(synchronize_session=False)
+            )
+
+        deleted_analysis = _query_scoped_analysis(
+            db,
+            assessment_id=assessment_id,
+            candidate_id=candidate_id,
+        ).delete(synchronize_session=False)
+        deleted_results = _query_scoped_results(
+            db,
+            assessment_id=assessment_id,
+            candidate_id=candidate_id,
+        ).delete(synchronize_session=False)
+        deleted_signals = _query_scoped_signals(
+            db,
+            assessment_id=assessment_id,
+            candidate_id=candidate_id,
+        ).delete(synchronize_session=False)
+        deleted_segments = _query_scoped_segments(
+            db,
+            assessment_id=assessment_id,
+            candidate_id=candidate_id,
+        ).delete(synchronize_session=False)
+        deleted_answers = _query_scoped_answers(
+            db,
+            assessment_id=assessment_id,
+            candidate_id=candidate_id,
+        ).delete(synchronize_session=False)
+        deleted_responses = _query_scoped_responses(
+            db,
+            assessment_id=assessment_id,
+            candidate_id=candidate_id,
+        ).delete(synchronize_session=False)
+
+        if candidate_id is not None:
+            candidate = db.get(AssessmentCandidate, candidate_id)
+            if candidate and candidate.assessment_id == assessment_id:
+                candidate.analysis_snapshot = None
+                candidate.prediction_snapshot = None
+                candidate.fit_score = None
+                candidate.confidence_score = None
+                candidate.risk_flags = None
+                candidate.last_result_sync_at = None
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+    return {
+        "predictions": deleted_predictions,
+        "analysis": deleted_analysis,
+        "assessment_results": deleted_results,
+        "response_signals": deleted_signals,
+        "response_segments": deleted_segments,
+        "assessment_answers": deleted_answers,
+        "responses": deleted_responses,
+    }
+
+
+def iter_assessment_answers(
+    db: Session,
+    assessment: Assessments,
+    *,
+    candidate_id: int | None = None,
+) -> list[dict[str, Any]]:
     items = get_assessment_items(db, assessment)
     answer_rows = {
         row.item_key: row
-        for row in db.query(AssessmentAnswer)
-        .filter(AssessmentAnswer.assessment_id == assessment.id)
-        .all()
+        for row in _query_scoped_answers(
+            db,
+            assessment_id=assessment.id,
+            candidate_id=candidate_id,
+        ).all()
     }
-    legacy_row = db.query(Responses).filter(Responses.assessment_id == assessment.id).first()
+    legacy_row = _query_scoped_responses(
+        db,
+        assessment_id=assessment.id,
+        candidate_id=candidate_id,
+    ).first()
     payloads: list[dict[str, Any]] = []
     for item in items:
         answer_text = None
@@ -240,3 +359,45 @@ def iter_assessment_answers(db: Session, assessment: Assessments) -> list[dict[s
             }
         )
     return payloads
+
+
+def _query_scoped_answers(db: Session, *, assessment_id: int, candidate_id: int | None):
+    query = db.query(AssessmentAnswer).filter(AssessmentAnswer.assessment_id == assessment_id)
+    if candidate_id is None:
+        return query.filter(AssessmentAnswer.candidate_id.is_(None))
+    return query.filter(AssessmentAnswer.candidate_id == candidate_id)
+
+
+def _query_scoped_responses(db: Session, *, assessment_id: int, candidate_id: int | None):
+    query = db.query(Responses).filter(Responses.assessment_id == assessment_id)
+    if candidate_id is None:
+        return query.filter(Responses.candidate_id.is_(None))
+    return query.filter(Responses.candidate_id == candidate_id)
+
+
+def _query_scoped_segments(db: Session, *, assessment_id: int, candidate_id: int | None):
+    query = db.query(ResponseSegment).filter(ResponseSegment.assessment_id == assessment_id)
+    if candidate_id is None:
+        return query.filter(ResponseSegment.candidate_id.is_(None))
+    return query.filter(ResponseSegment.candidate_id == candidate_id)
+
+
+def _query_scoped_signals(db: Session, *, assessment_id: int, candidate_id: int | None):
+    query = db.query(ResponseSignal).filter(ResponseSignal.assessment_id == assessment_id)
+    if candidate_id is None:
+        return query.filter(ResponseSignal.candidate_id.is_(None))
+    return query.filter(ResponseSignal.candidate_id == candidate_id)
+
+
+def _query_scoped_analysis(db: Session, *, assessment_id: int, candidate_id: int | None):
+    query = db.query(Analysis).filter(Analysis.assessment_id == assessment_id)
+    if candidate_id is None:
+        return query.filter(Analysis.candidate_id.is_(None))
+    return query.filter(Analysis.candidate_id == candidate_id)
+
+
+def _query_scoped_results(db: Session, *, assessment_id: int, candidate_id: int | None):
+    query = db.query(AssessmentResult).filter(AssessmentResult.assessment_id == assessment_id)
+    if candidate_id is None:
+        return query.filter(AssessmentResult.candidate_id.is_(None))
+    return query.filter(AssessmentResult.candidate_id == candidate_id)
