@@ -1,10 +1,9 @@
-from os import getenv
-
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
-from app.auth.signup.schemas import SignupRequest, SignupResponse, VerifyEmailResponse
-from app.auth.signup.service import create_user, verify_email
+from app.auth.signup.schemas import SignupRequest, SignupResponse
+from app.auth.signup.service import create_user
+from app.auth.urls import build_frontend_verification_url_template
 from app.db import get_db
 
 router = APIRouter()
@@ -18,11 +17,9 @@ router = APIRouter()
 )
 def signup(
     payload: SignupRequest,
-    request: Request,
     db: Session = Depends(get_db),
 ):
-    base = getenv("APP_URL", str(request.base_url).rstrip("/"))
-    verification_url_template = f"{base}/auth/verify/{{token}}"
+    verification_url_template = build_frontend_verification_url_template()
     user = create_user(db, payload, verification_url_template)
     return SignupResponse(
         id=user.id,
@@ -31,8 +28,3 @@ def signup(
         surname=user.surname,
         message="Account created. Please check your email to verify your account.",
     )
-
-
-@router.get("/verify/{token}", response_model=VerifyEmailResponse)
-def verify_email_endpoint(token: str, db: Session = Depends(get_db)):
-    return VerifyEmailResponse(success=verify_email(db, token))

@@ -31,6 +31,7 @@ from app.auth.candidate_access import CANDIDATE_ACCESS_COOKIE_NAME
 from app.auth.login.deps import ACCESS_TOKEN_COOKIE_NAME
 from app.auth.router import router as auth_router
 from app.auth.login.deps import require_authenticated_user
+from app.auth.signup.verify_router import router as verify_router
 from app.agent.routes import router as agent_router
 from app.routers.candidate import router as candidate_router
 from app.db import SessionLocal
@@ -74,6 +75,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(verify_router)
 app.include_router(auth_router)
 app.include_router(candidate_router)
 protected_dependencies = [Depends(require_authenticated_user)]

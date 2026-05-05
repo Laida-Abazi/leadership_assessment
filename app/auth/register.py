@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.db.models import User
 from app.auth.email import send_verification_email, send_reset_password_email
+from app.auth.urls import build_frontend_verification_url
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -100,7 +101,7 @@ def register(request: RegisterRequest, req: Request, db: Session = Depends(get_d
     db.commit()
     db.refresh(user)
 
-    verification_url = _build_url(req, f"/auth/verify/{token}")
+    verification_url = build_frontend_verification_url(token)
     send_verification_email(user.email, user.name, verification_url)
 
     return RegisterResponse(

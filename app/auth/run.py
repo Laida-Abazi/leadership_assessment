@@ -60,6 +60,10 @@ from signup.router import router as signup_router
 
 app.include_router(signup_router, prefix="/auth", tags=["signup"])
 
+from signup.verify_router import router as verify_router
+
+app.include_router(verify_router)
+
 from login.router import router as login_router
 
 app.include_router(login_router, prefix="/auth", tags=["login"])
