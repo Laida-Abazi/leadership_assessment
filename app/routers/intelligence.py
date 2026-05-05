@@ -15,6 +15,7 @@ from app.db import get_db
 from app.db.models import Analysis, AssessmentResult, Assessments, Predictions
 from app.db.models.response_segment import ResponseSegment
 from app.db.models.response_signal import ResponseSignal
+from app.services.assessment_persistence import count_saved_answers, get_assessment_item_payloads
 
 logger = logging.getLogger(__name__)
 
@@ -215,10 +216,43 @@ def build_status_response(
     *,
     candidate_id: int | None = None,
 ) -> dict[str, Any]:
-    _require_assessment(db, assessment_id)
-    from app.services.intelligence import get_intelligence_status
+    assessment = _require_assessment(db, assessment_id)
+    ordered_item_keys = [
+        item["item_key"]
+        for item in get_assessment_item_payloads(db, assessment)
+        if item.get("prompt_text")
+    ]
+    completed_question_count = count_saved_answers(
+        assessment_id,
+        ordered_item_keys,
+        candidate_id=candidate_id,
+    )
+    total_questions = len(ordered_item_keys)
+    interview_complete = total_questions > 0 and completed_question_count >= total_questions
 
-    return get_intelligence_status(assessment_id, candidate_id=candidate_id)
+    from app.services.intelligence import get_intelligence_status, schedule_final_analysis
+
+    status = get_intelligence_status(assessment_id, candidate_id=candidate_id)
+    if (
+        interview_complete
+        and assessment.job_requirements_id is not None
+        and not status["analysis_ready"]
+        and not status["prediction_ready"]
+        and not status["analysis_running"]
+        and status["pending_signal_tasks"] == 0
+        and not status["failed"]
+    ):
+        schedule_final_analysis(
+            assessment_id=assessment_id,
+            job_requirements_id=assessment.job_requirements_id,
+            candidate_id=candidate_id,
+        )
+        status = get_intelligence_status(assessment_id, candidate_id=candidate_id)
+
+    status["completed_question_count"] = completed_question_count
+    status["total_questions"] = total_questions
+    status["interview_complete"] = interview_complete
+    return status
 
 
 def build_analysis_response(

@@ -12,6 +12,7 @@ from app.as_requirements.routes.ai_analysis import (
 from app.auth.login.deps import get_current_user_id
 from app.db import get_db
 from app.db.models import Analysis, AssessmentAccessLink, AssessmentCandidate, Assessments, JobRequirements
+from app.routers.intelligence import build_status_response
 from app.rag.embeddings import get_context_for_agent, index_assessment
 from app.services.assessment_persistence import get_assessment_item_payloads, sync_assessment_items
 from app.services.assessment_registry import (
@@ -412,6 +413,10 @@ class AssessmentCandidateOut(BaseModel):
     link_created_at: str | None = None
     link_expires_at: str | None = None
     last_result_sync_at: str | None = None
+    completed_question_count: int | None = None
+    total_questions: int | None = None
+    interview_complete: bool | None = None
+    analysis_status: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -561,5 +566,21 @@ def list_assessment_candidates(
         query = query.filter(AssessmentCandidate.assessment_id == assessment_id)
 
     candidates = query.all()
+    candidate_status_by_id: dict[int, dict] = {}
+    for candidate in candidates:
+        candidate_status_by_id[candidate.id] = build_status_response(
+            db,
+            candidate.assessment_id,
+            candidate_id=candidate.id,
+        )
     refresh_candidate_result_snapshots(db, candidates)
-    return [AssessmentCandidateOut(**serialize_candidate(candidate)) for candidate in candidates]
+    return [
+        AssessmentCandidateOut(
+            **serialize_candidate(candidate),
+            completed_question_count=candidate_status_by_id[candidate.id].get("completed_question_count"),
+            total_questions=candidate_status_by_id[candidate.id].get("total_questions"),
+            interview_complete=candidate_status_by_id[candidate.id].get("interview_complete"),
+            analysis_status=candidate_status_by_id[candidate.id].get("status"),
+        )
+        for candidate in candidates
+    ]

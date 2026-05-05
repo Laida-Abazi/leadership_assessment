@@ -202,6 +202,14 @@ def get_intelligence_status(assessment_id: int, *, candidate_id: int | None = No
             status_value = "pending"
         else:
             status_value = "pending"
+    elif (
+        status_value in {"pending", "running"}
+        and (not analysis_task or analysis_task.done())
+        and not pending_signal_tasks
+        and (prediction is not None or analysis is not None)
+    ):
+        # Prefer durable DB state over stale in-memory flags after reloads/reconnects.
+        status_value = "completed"
 
     return {
         "assessment_id": assessment_id,

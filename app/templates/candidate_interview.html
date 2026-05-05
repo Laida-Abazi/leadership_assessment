@@ -376,6 +376,23 @@
           const status = await response.json();
           resultsEl.classList.remove("hidden");
           metricStatusEl.textContent = (status.status || "pending").toUpperCase();
+          const completedQuestions = Number(status.completed_question_count || 0);
+          const totalQuestions = Number(status.total_questions || 0);
+
+          if (!status.interview_complete) {
+            resultsEl.classList.add("hidden");
+            metricStatusEl.textContent = totalQuestions ? (completedQuestions + " / " + totalQuestions) : "READY";
+            resetPendingResultCopy();
+            if (completedQuestions > 0 && totalQuestions > 0) {
+              setStatus(
+                "connected",
+                "Interview paused. You answered " + completedQuestions + " of " + totalQuestions + " questions. Click Start Interview to continue."
+              );
+            } else {
+              setStatus("connected", "Ready to start your interview.");
+            }
+            return;
+          }
 
           if (status.status === "completed") {
             setStatus("connected", "Interview complete. Your analysis is ready.");
