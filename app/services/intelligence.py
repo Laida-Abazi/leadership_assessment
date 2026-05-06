@@ -1318,6 +1318,16 @@ async def _generate_narrative(aggregated_data: dict, fit_data: dict) -> str:
         return "Narrative generation failed due to an internal error."
 
 
+def _is_assessment_result_integrity_error(exc: IntegrityError) -> bool:
+    """Return True when a DB write failed on an assessment_results uniqueness check."""
+    statement = (getattr(exc, "statement", "") or "").lower()
+    message = str(getattr(exc, "orig", exc)).lower()
+    return (
+        "assessment_results" in statement
+        and ("duplicate key value violates unique constraint" in message or "unique constraint failed" in message)
+    )
+
+
 def _upsert_analysis(
     db,
     assessment_id: int,
@@ -1328,6 +1338,8 @@ def _upsert_analysis(
     type_result: dict,
     narrative: str,
     prediction_text: str,
+    *,
+    _retry_on_result_conflict: bool = True,
 ) -> None:
     """Write or update the Analysis and Predictions rows for this assessment."""
     analysis_row = _apply_candidate_scope(
@@ -1450,7 +1462,31 @@ def _upsert_analysis(
         shared_result.get("confidence_score", _overall_confidence(aggregated_data)),
         len(risk_flags or []),
     )
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        if _retry_on_result_conflict and _is_assessment_result_integrity_error(exc):
+            logger.warning(
+                "[intelligence] _upsert_analysis retrying after AssessmentResult uniqueness conflict "
+                "(assessment_id=%s candidate_id=%s): %s",
+                assessment_id,
+                candidate_id,
+                exc,
+            )
+            return _upsert_analysis(
+                db,
+                assessment_id,
+                job_requirements_id,
+                candidate_id,
+                aggregated_data,
+                shared_result,
+                type_result,
+                narrative,
+                prediction_text,
+                _retry_on_result_conflict=False,
+            )
+        raise
 
 
 def _build_risk_flags(aggregated_data: dict, fit_data: dict) -> list[dict]:

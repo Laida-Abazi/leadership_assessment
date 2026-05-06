@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 
 import app.services.intelligence as intelligence
 from app.auth.candidate_access import (
@@ -287,3 +288,115 @@ def test_schedule_final_analysis_marks_failed_after_exhausting_retries(monkeypat
         assert "fatal" in intelligence._ANALYSIS_STATE[77]["last_error"]
 
     asyncio.run(scenario())
+
+
+class _FakeUpsertQuery:
+    def __init__(self, session, model):
+        self.session = session
+        self.model = model
+
+    def filter(self, *args, **kwargs):
+        return self
+
+    def first(self):
+        if self.model is intelligence.Analysis:
+            return self.session.analysis_row
+        if self.model is intelligence.Predictions:
+            return self.session.prediction_row
+        if self.model is intelligence.AssessmentResult:
+            return self.session.result_row
+        raise AssertionError(f"Unexpected model queried: {self.model}")
+
+
+class _FakeUpsertSession:
+    def __init__(self):
+        self.analysis_row = None
+        self.prediction_row = None
+        self.result_row = None
+        self.pending_result_row = None
+        self.commit_count = 0
+        self.rollback_count = 0
+
+    def query(self, model):
+        return _FakeUpsertQuery(self, model)
+
+    def add(self, obj):
+        if isinstance(obj, intelligence.Analysis):
+            self.analysis_row = obj
+        elif isinstance(obj, intelligence.Predictions):
+            self.prediction_row = obj
+        elif isinstance(obj, intelligence.AssessmentResult):
+            self.pending_result_row = obj
+        else:
+            raise AssertionError(f"Unexpected object added: {obj!r}")
+
+    def flush(self):
+        if self.analysis_row is not None and getattr(self.analysis_row, "id", None) is None:
+            self.analysis_row.id = 501
+
+    def commit(self):
+        self.commit_count += 1
+        if self.commit_count == 1:
+            raise IntegrityError(
+                "INSERT INTO assessment_results (...) VALUES (...)",
+                {},
+                Exception(
+                    'duplicate key value violates unique constraint "assessment_results_assessment_id_key"'
+                ),
+            )
+
+    def rollback(self):
+        self.rollback_count += 1
+        self.analysis_row = None
+        self.prediction_row = None
+        self.pending_result_row = None
+        self.result_row = SimpleNamespace(
+            id=88,
+            assessment_id=1,
+            candidate_id=None,
+            shared_result_json=None,
+            type_result_json=None,
+            narrative="stale",
+            fit_score=None,
+            confidence_score=None,
+            risk_flags=None,
+        )
+
+
+def test_upsert_analysis_retries_assessment_result_uniqueness_conflict(monkeypatch):
+    session = _FakeUpsertSession()
+    monkeypatch.setattr(
+        intelligence,
+        "ensure_responses_row",
+        lambda *_args, **_kwargs: SimpleNamespace(id=321),
+    )
+
+    intelligence._upsert_analysis(
+        session,
+        assessment_id=1,
+        job_requirements_id=2,
+        candidate_id=None,
+        aggregated_data={
+            "aggregated_traits": {},
+            "consistency_scores": {},
+            "contradictions": [],
+            "behavioral_patterns": {},
+        },
+        shared_result={
+            "fit_score": 0.42,
+            "confidence_score": 0.64,
+            "risk_flags": [{"type": "insufficient_data"}],
+            "trait_gaps": {},
+        },
+        type_result={"assessment": "mbti"},
+        narrative="Updated narrative",
+        prediction_text="Proceed with caution",
+    )
+
+    assert session.commit_count == 2
+    assert session.rollback_count == 1
+    assert session.result_row is not None
+    assert session.result_row.narrative == "Updated narrative"
+    assert session.result_row.fit_score == 0.42
+    assert session.result_row.confidence_score == 0.64
+    assert session.result_row.risk_flags == [{"type": "insufficient_data"}]
