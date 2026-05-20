@@ -4,10 +4,10 @@ and predictions produced by the intelligence pipeline.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
+from celery.result import AsyncResult
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -16,21 +16,17 @@ from app.db.models import Analysis, AssessmentResult, Assessments, Predictions
 from app.db.models.response_segment import ResponseSegment
 from app.db.models.response_signal import ResponseSignal
 from app.services.assessment_persistence import count_saved_answers, get_assessment_item_payloads
+from app.services.task_registry import task_registry
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/intelligence", tags=["intelligence"])
-_RERUN_TASKS: dict[int | tuple[int, int], asyncio.Task] = {}
 
 
 def _apply_candidate_scope(query, model, candidate_id: int | None):
     if candidate_id is None:
         return query.filter(model.candidate_id.is_(None))
     return query.filter(model.candidate_id == candidate_id)
-
-
-def _scope_key(assessment_id: int, candidate_id: int | None) -> int | tuple[int, int]:
-    return assessment_id if candidate_id is None else (assessment_id, candidate_id)
 
 
 # ---------------------------------------------------------------------------
@@ -154,48 +150,34 @@ async def rerun_analysis(
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
     """Manually trigger final analysis using already collected segments/signals."""
-    assessment = _require_assessment(db, assessment_id)
-    jrq_id = assessment.job_requirements_id
-    from app.services.intelligence import schedule_final_analysis
+    _require_assessment(db, assessment_id)
+    from app.tasks.analysis import dispatch_analysis_chord
 
-    scope_key = _scope_key(assessment_id, candidate_id)
-    existing = _RERUN_TASKS.get(scope_key)
-    if existing and not existing.done():
+    if task_registry.is_analysis_running(candidate_id):
         return {
-            "status": "accepted",
-            "detail": f"run_full_analysis already running for assessment_id={assessment_id} candidate_id={candidate_id}",
+            "status": "already_running",
+            "message": "Analysis is already in progress",
         }
 
-    async def _run() -> None:
-        try:
-            scheduled = schedule_final_analysis(
-                assessment_id=assessment_id,
-                job_requirements_id=jrq_id,
-                candidate_id=candidate_id,
-            )
-            if not scheduled:
-                logger.info(
-                    "[intelligence] final analysis already running for assessment_id=%s candidate_id=%s",
-                    assessment_id,
-                    candidate_id,
-                )
-        except Exception as exc:
-            logger.exception(
-                "[intelligence] rerun_analysis failed for assessment_id=%s candidate_id=%s: %s",
-                assessment_id,
-                candidate_id,
-                exc,
-            )
-        finally:
-            _RERUN_TASKS.pop(scope_key, None)
+    segment_ids = get_segment_ids_for_candidate(assessment_id, candidate_id=candidate_id, db=db)
+    if not segment_ids:
+        return {
+            "status": "error",
+            "message": "No segments found. Interview may be incomplete.",
+        }
 
-    task = asyncio.create_task(_run(), name=f"rerun-analysis-{assessment_id}")
-    _RERUN_TASKS[scope_key] = task
-    # keep signature-compatible with existing endpoint behavior
+    pipeline_id = dispatch_analysis_chord(candidate_id, assessment_id, segment_ids)
+    logger.info(
+        "[intelligence] rerun_analysis dispatched pipeline_id=%s assessment_id=%s candidate_id=%s segments=%s",
+        pipeline_id,
+        assessment_id,
+        candidate_id,
+        len(segment_ids),
+    )
     background_tasks.add_task(lambda: None)
     return {
-        "status": "accepted",
-        "detail": f"run_full_analysis dispatched for assessment_id={assessment_id} candidate_id={candidate_id}",
+        "status": "dispatched",
+        "pipeline_id": pipeline_id,
     }
 
 
@@ -216,6 +198,7 @@ def build_status_response(
     *,
     candidate_id: int | None = None,
 ) -> dict[str, Any]:
+    # READ-ONLY. This endpoint never triggers computation. See POST /rerun.
     assessment = _require_assessment(db, assessment_id)
     ordered_item_keys = [
         item["item_key"]
@@ -230,29 +213,71 @@ def build_status_response(
     total_questions = len(ordered_item_keys)
     interview_complete = total_questions > 0 and completed_question_count >= total_questions
 
-    from app.services.intelligence import get_intelligence_status, schedule_final_analysis
+    pipeline_id = task_registry.get_pipeline_id(candidate_id)
+    if pipeline_id:
+        result = AsyncResult(pipeline_id)
+        if result.state == "SUCCESS":
+            status: dict[str, Any] = {"status": "complete", "source": "pipeline"}
+        elif result.state == "FAILURE":
+            status = {
+                "status": "failed",
+                "source": "pipeline",
+                "error": str(result.result),
+            }
+        else:
+            status = {
+                "status": "processing",
+                "state": result.state,
+                "source": "pipeline",
+            }
+        status["pipeline_id"] = pipeline_id
+    else:
+        analysis = get_analysis_by_candidate(assessment_id, candidate_id=candidate_id, db=db)
+        if analysis:
+            status = {"status": "complete", "source": "database"}
+        else:
+            status = {
+                "status": "pending",
+                "message": "Use POST /rerun to trigger analysis",
+            }
 
-    status = get_intelligence_status(assessment_id, candidate_id=candidate_id)
-    if (
-        interview_complete
-        and assessment.job_requirements_id is not None
-        and not status["analysis_ready"]
-        and not status["prediction_ready"]
-        and not status["analysis_running"]
-        and status["pending_signal_tasks"] == 0
-        and not status["failed"]
-    ):
-        schedule_final_analysis(
-            assessment_id=assessment_id,
-            job_requirements_id=assessment.job_requirements_id,
-            candidate_id=candidate_id,
-        )
-        status = get_intelligence_status(assessment_id, candidate_id=candidate_id)
-
+    status["assessment_id"] = assessment_id
+    status["candidate_id"] = candidate_id
     status["completed_question_count"] = completed_question_count
     status["total_questions"] = total_questions
     status["interview_complete"] = interview_complete
     return status
+
+
+def get_analysis_by_candidate(
+    assessment_id: int,
+    *,
+    candidate_id: int | None = None,
+    db: Session,
+) -> Analysis | None:
+    return _apply_candidate_scope(
+        db.query(Analysis).filter(Analysis.assessment_id == assessment_id),
+        Analysis,
+        candidate_id,
+    ).order_by(Analysis.id.desc()).first()
+
+
+def get_segment_ids_for_candidate(
+    assessment_id: int,
+    *,
+    candidate_id: int | None = None,
+    db: Session,
+) -> list[str]:
+    rows = (
+        _apply_candidate_scope(
+            db.query(ResponseSegment.id).filter(ResponseSegment.assessment_id == assessment_id),
+            ResponseSegment,
+            candidate_id,
+        )
+        .order_by(ResponseSegment.id.asc())
+        .all()
+    )
+    return [str(segment_id) for (segment_id,) in rows]
 
 
 def build_analysis_response(

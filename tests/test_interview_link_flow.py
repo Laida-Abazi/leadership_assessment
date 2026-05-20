@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio
+import sys
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -199,95 +199,137 @@ def test_apply_result_snapshot_prefers_assessment_result_scores():
     assert candidate.last_result_sync_at >= now
 
 
-def test_schedule_final_analysis_retries_once_and_completes(monkeypatch):
-    intelligence._ANALYSIS_TASKS.clear()
-    intelligence._ANALYSIS_STATE.clear()
+class _FakeSegmentQuery:
+    def __init__(self, segment_ids):
+        self.segment_ids = segment_ids
 
-    calls = {"count": 0}
+    def filter(self, *args, **kwargs):
+        return self
 
-    async def fake_wait(*args, **kwargs):
+    def order_by(self, *args, **kwargs):
+        return self
+
+    def all(self):
+        return [(segment_id,) for segment_id in self.segment_ids]
+
+
+class _FakeSegmentSession:
+    def __init__(self, segment_ids):
+        self.segment_ids = segment_ids
+
+    def query(self, _model):
+        return _FakeSegmentQuery(self.segment_ids)
+
+    def close(self):
         return None
 
-    async def fake_run(**kwargs):
-        calls["count"] += 1
-        if calls["count"] == 1:
-            raise RuntimeError("transient")
 
-    monkeypatch.setattr(intelligence, "_await_registered_signal_tasks", fake_wait)
-    monkeypatch.setattr(intelligence, "run_full_analysis_chained", fake_run)
+def test_schedule_final_analysis_dispatches_chord_and_returns_pipeline_id(monkeypatch):
+    intelligence._ANALYSIS_STATE.clear()
 
-    async def scenario():
-        scheduled = intelligence.schedule_final_analysis(
-            assessment_id=1,
-            job_requirements_id=2,
-            retry_attempts=1,
-            retry_delay_seconds=0,
-        )
-        assert scheduled is True
-        await intelligence._ANALYSIS_TASKS[1]
-        assert calls["count"] == 2
-        assert intelligence._ANALYSIS_STATE[1]["status"] == "completed"
-        assert intelligence._ANALYSIS_STATE[1]["attempts"] == 2
+    monkeypatch.setattr(intelligence, "SessionLocal", lambda: _FakeSegmentSession([11, 12]))
 
-    asyncio.run(scenario())
+    dispatch_calls = {}
+
+    def fake_dispatch(candidate_id, assessment_id, segment_ids):
+        dispatch_calls["candidate_id"] = candidate_id
+        dispatch_calls["assessment_id"] = assessment_id
+        dispatch_calls["segment_ids"] = segment_ids
+        return "pipeline-123"
+
+    monkeypatch.setitem(
+        sys.modules,
+        "app.tasks.analysis",
+        SimpleNamespace(dispatch_analysis_chord=fake_dispatch),
+    )
+
+    pipeline_id = intelligence.schedule_final_analysis(
+        assessment_id=1,
+        job_requirements_id=2,
+        retry_attempts=1,
+        retry_delay_seconds=0,
+    )
+
+    assert pipeline_id == "pipeline-123"
+    assert dispatch_calls == {
+        "candidate_id": None,
+        "assessment_id": 1,
+        "segment_ids": ["11", "12"],
+    }
+    assert intelligence._ANALYSIS_STATE[1]["status"] == "pending"
+    assert intelligence._ANALYSIS_STATE[1]["attempts"] == 0
 
 
 def test_schedule_final_analysis_tracks_candidate_specific_scope(monkeypatch):
-    intelligence._ANALYSIS_TASKS.clear()
     intelligence._ANALYSIS_STATE.clear()
 
-    async def fake_wait(*args, **kwargs):
-        return None
+    monkeypatch.setattr(intelligence, "SessionLocal", lambda: _FakeSegmentSession([21, 22, 23]))
 
-    async def fake_run(**kwargs):
-        assert kwargs["candidate_id"] == 5
+    dispatch_calls = {}
 
-    monkeypatch.setattr(intelligence, "_await_registered_signal_tasks", fake_wait)
-    monkeypatch.setattr(intelligence, "run_full_analysis_chained", fake_run)
+    def fake_dispatch(candidate_id, assessment_id, segment_ids):
+        dispatch_calls["candidate_id"] = candidate_id
+        dispatch_calls["assessment_id"] = assessment_id
+        dispatch_calls["segment_ids"] = segment_ids
+        return "pipeline-456"
 
-    async def scenario():
-        scheduled = intelligence.schedule_final_analysis(
-            assessment_id=1,
-            job_requirements_id=2,
-            candidate_id=5,
-            retry_attempts=0,
-            retry_delay_seconds=0,
-        )
-        assert scheduled is True
-        await intelligence._ANALYSIS_TASKS[(1, 5)]
-        assert intelligence._ANALYSIS_STATE[(1, 5)]["status"] == "completed"
-        assert intelligence._ANALYSIS_STATE[(1, 5)]["candidate_id"] == 5
+    monkeypatch.setitem(
+        sys.modules,
+        "app.tasks.analysis",
+        SimpleNamespace(dispatch_analysis_chord=fake_dispatch),
+    )
 
-    asyncio.run(scenario())
+    pipeline_id = intelligence.schedule_final_analysis(
+        assessment_id=1,
+        job_requirements_id=2,
+        candidate_id=5,
+        retry_attempts=0,
+        retry_delay_seconds=0,
+    )
+
+    assert pipeline_id == "pipeline-456"
+    assert dispatch_calls == {
+        "candidate_id": 5,
+        "assessment_id": 1,
+        "segment_ids": ["21", "22", "23"],
+    }
+    assert intelligence._ANALYSIS_STATE[(1, 5)]["status"] == "pending"
+    assert intelligence._ANALYSIS_STATE[(1, 5)]["candidate_id"] == 5
 
 
-def test_schedule_final_analysis_marks_failed_after_exhausting_retries(monkeypatch):
-    intelligence._ANALYSIS_TASKS.clear()
+def test_schedule_final_analysis_dispatches_empty_segment_list(monkeypatch):
     intelligence._ANALYSIS_STATE.clear()
 
-    async def fake_wait(*args, **kwargs):
-        return None
+    monkeypatch.setattr(intelligence, "SessionLocal", lambda: _FakeSegmentSession([]))
 
-    async def fake_run(**kwargs):
-        raise RuntimeError("fatal")
+    dispatch_calls = {}
 
-    monkeypatch.setattr(intelligence, "_await_registered_signal_tasks", fake_wait)
-    monkeypatch.setattr(intelligence, "run_full_analysis_chained", fake_run)
+    def fake_dispatch(candidate_id, assessment_id, segment_ids):
+        dispatch_calls["candidate_id"] = candidate_id
+        dispatch_calls["assessment_id"] = assessment_id
+        dispatch_calls["segment_ids"] = segment_ids
+        return "pipeline-empty"
 
-    async def scenario():
-        scheduled = intelligence.schedule_final_analysis(
-            assessment_id=77,
-            job_requirements_id=3,
-            retry_attempts=0,
-            retry_delay_seconds=0,
-        )
-        assert scheduled is True
-        await intelligence._ANALYSIS_TASKS[77]
-        assert intelligence._ANALYSIS_STATE[77]["status"] == "failed"
-        assert intelligence._ANALYSIS_STATE[77]["attempts"] == 1
-        assert "fatal" in intelligence._ANALYSIS_STATE[77]["last_error"]
+    monkeypatch.setitem(
+        sys.modules,
+        "app.tasks.analysis",
+        SimpleNamespace(dispatch_analysis_chord=fake_dispatch),
+    )
 
-    asyncio.run(scenario())
+    pipeline_id = intelligence.schedule_final_analysis(
+        assessment_id=77,
+        job_requirements_id=3,
+        retry_attempts=0,
+        retry_delay_seconds=0,
+    )
+
+    assert pipeline_id == "pipeline-empty"
+    assert dispatch_calls == {
+        "candidate_id": None,
+        "assessment_id": 77,
+        "segment_ids": [],
+    }
+    assert intelligence._ANALYSIS_STATE[77]["status"] == "pending"
 
 
 class _FakeUpsertQuery:

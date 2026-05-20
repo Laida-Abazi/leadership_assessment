@@ -1,0 +1,16 @@
+FROM python:3.13-slim
+
+WORKDIR /app
+
+COPY app/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+ARG WORKER_QUEUE=signals
+
+ENV CELERY_BROKER_URL=amqp://devuser:devpass@rabbitmq:5672//
+ENV CELERY_RESULT_BACKEND=redis://redis:6379/0
+ENV REDIS_URL=redis://redis:6379/0
+
+CMD ["sh", "-c", "celery -A app.celery_app worker -Q ${WORKER_QUEUE} --loglevel=info"]

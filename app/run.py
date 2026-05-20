@@ -34,6 +34,7 @@ from app.auth.login.deps import require_authenticated_user
 from app.auth.signup.verify_router import router as verify_router
 from app.agent.routes import router as agent_router
 from app.routers.candidate import router as candidate_router
+from app.routers.health import router as health_router
 from app.db import SessionLocal
 from app.routers.intelligence import router as intelligence_router
 from app.services.assessment_registry import ensure_assessment_types_seeded
@@ -84,12 +85,7 @@ app.include_router(assessments_router, dependencies=protected_dependencies)
 app.include_router(analysis_router, dependencies=protected_dependencies)
 app.include_router(agent_router)
 app.include_router(intelligence_router, dependencies=protected_dependencies)
-
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+app.include_router(health_router)
 
 
 @app.get("/test/pipeline")

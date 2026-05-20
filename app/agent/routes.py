@@ -3,6 +3,7 @@ Voice agent routes: Gemini Live (STS) WebSocket proxy for friendly conversation
 and structured assessment interviews.
 """
 import asyncio
+from dataclasses import asdict
 import json
 import logging
 import os
@@ -16,7 +17,11 @@ import websockets.exceptions
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
-from app.auth.candidate_access import CANDIDATE_ACCESS_COOKIE_NAME, get_candidate_access_context
+from app.auth.candidate_access import (
+    CANDIDATE_ACCESS_COOKIE_NAME,
+    CandidateAccessContext,
+    get_candidate_access_context,
+)
 from app.auth.login.deps import get_current_user_id, require_authenticated_user
 from app.as_requirements.config.models_setup import MODEL_MINI, get_openai_client
 from app.db import SessionLocal
@@ -28,7 +33,17 @@ from app.services.assessment_persistence import (
     get_assessment_item_payloads,
     save_assessment_answer,
 )
-from app.services.assessment_registry import get_assessment_definition
+from app.services.assessment_registry import (
+    AssessmentItemTemplate,
+    AssessmentTypeDefinition,
+    get_assessment_definition,
+)
+from app.services.cached_reads import (
+    get_assessment_definition_cached,
+    get_assessment_items_cached,
+    get_candidate_context_cached,
+)
+from app.services.task_registry import task_registry
 
 logger = logging.getLogger(__name__)
 
@@ -278,6 +293,40 @@ def _normalize_question_text(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", (text or "").lower())).strip()
 
 
+def _serialize_assessment_definition(definition: AssessmentTypeDefinition) -> dict:
+    return asdict(definition)
+
+
+def _deserialize_assessment_definition(payload: dict) -> AssessmentTypeDefinition:
+    item_templates = tuple(
+        AssessmentItemTemplate(**item_payload)
+        for item_payload in (payload.get("item_templates") or [])
+    )
+    return AssessmentTypeDefinition(
+        code=payload["code"],
+        name=payload["name"],
+        version=payload["version"],
+        description=payload["description"],
+        capture_mode=payload["capture_mode"],
+        output_schema=payload["output_schema"],
+        agent_brief=payload["agent_brief"],
+        item_templates=item_templates,
+        generation_mode=payload.get("generation_mode", "static"),
+    )
+
+
+def _serialize_candidate_context(context: CandidateAccessContext) -> dict:
+    return asdict(context)
+
+
+def _deserialize_candidate_context(payload: dict) -> CandidateAccessContext:
+    return CandidateAccessContext(
+        assessment_id=int(payload["assessment_id"]),
+        link_id=int(payload["link_id"]),
+        token_type=payload.get("token_type", "candidate_interview"),
+    )
+
+
 def _detect_question_from_output(output_text: str, questions: list[str], current_index: int) -> int | None:
     """Best-effort detection of which canonical question the agent just asked."""
     normalized_output = _normalize_question_text(output_text)
@@ -450,7 +499,14 @@ async def agent_websocket(websocket: WebSocket):
     try:
         try:
             if candidate_token:
-                candidate_context = get_candidate_access_context(websocket)
+                async def _fetch_candidate_context(_cache_key: str) -> dict:
+                    return _serialize_candidate_context(get_candidate_access_context(websocket))
+
+                candidate_context_payload = await get_candidate_context_cached(
+                    candidate_token,
+                    fetch_fn=_fetch_candidate_context,
+                )
+                candidate_context = _deserialize_candidate_context(candidate_context_payload)
             else:
                 admin_user_id = get_current_user_id(websocket)
                 user = db_auth.get(User, admin_user_id)
@@ -503,6 +559,7 @@ async def agent_websocket(websocket: WebSocket):
     assessment_brief: str | None = None
     already_saved = 0                 # questions answered in a previous session
     job_requirements_id: Optional[int] = None
+    initial_segment_ids: list[str] = []
 
     if assessment_id is not None:
         db = SessionLocal()
@@ -542,11 +599,42 @@ async def agent_websocket(websocket: WebSocket):
                             assessment.user_id,
                         )
                 job_requirements_id = assessment.job_requirements_id
-                definition = get_assessment_definition(assessment.assessment_type_code)
+                async def _fetch_assessment_definition(_cache_key: int) -> dict:
+                    return _serialize_assessment_definition(
+                        get_assessment_definition(assessment.assessment_type_code)
+                    )
+
+                definition_payload = await get_assessment_definition_cached(
+                    assessment_id,
+                    fetch_fn=_fetch_assessment_definition,
+                )
+                definition = _deserialize_assessment_definition(definition_payload)
                 assessment_label = definition.name
                 assessment_brief = definition.agent_brief
-                questions = _assessment_questions_list(assessment, db)
-                response_fields = _response_fields_for_assessment(assessment, db)
+
+                async def _fetch_assessment_items(_cache_key: int) -> list[dict]:
+                    return get_assessment_item_payloads(db, assessment)
+
+                item_payloads = await get_assessment_items_cached(
+                    assessment_id,
+                    fetch_fn=_fetch_assessment_items,
+                )
+                questions = [item["prompt_text"].strip() for item in item_payloads if item.get("prompt_text")]
+                response_fields = [item["item_key"] for item in item_payloads if item.get("prompt_text")]
+                initial_segment_ids = [
+                    str(segment_id)
+                    for (segment_id,) in (
+                        db.query(ResponseSegment.id)
+                        .filter(
+                            ResponseSegment.assessment_id == assessment_id,
+                            ResponseSegment.candidate_id == candidate_id
+                            if candidate_id is not None
+                            else ResponseSegment.candidate_id.is_(None),
+                        )
+                        .order_by(ResponseSegment.id.asc())
+                        .all()
+                    )
+                ]
                 logger.info(
                     "[%s] Interview mapping: total_questions=%s response_fields=%s",
                     session_id,
@@ -624,7 +712,9 @@ async def agent_websocket(websocket: WebSocket):
         "agent_turn_classification": "CONTINUE",
         # Intelligence pipeline state.
         "segment_sequence": 0,
+        "segment_ids": initial_segment_ids,
         "transcript_since_last_segment": "",
+        "analysis_pipeline_id": None,
     }
     logger.info(
         "[%s] State init: interview_mode=%s in_warmup=%s current_q=%s/%s session_open=%s",
@@ -695,23 +785,36 @@ async def agent_websocket(websocket: WebSocket):
         if not interview_complete.is_set():
             interview_complete.set()
 
-        from app.services.intelligence import schedule_final_analysis
+        if state.get("analysis_pipeline_id"):
+            logger.info(
+                "[%s] Final analysis already dispatched in this session: reason=%s pipeline_id=%s",
+                session_id,
+                reason,
+                state["analysis_pipeline_id"],
+            )
+            return False
 
-        scheduled = schedule_final_analysis(
-            assessment_id=assessment_id,
-            job_requirements_id=job_requirements_id,
-            candidate_id=candidate_id,
+        from app.tasks.analysis import dispatch_analysis_chord
+
+        pipeline_id = dispatch_analysis_chord(
+            candidate_id,
+            assessment_id,
+            list(state.get("segment_ids") or []),
         )
+        state["analysis_pipeline_id"] = pipeline_id
         logger.info(
-            "[%s] Final analysis readiness reached: reason=%s assessment_id=%s scheduled=%s saved=%s total=%s",
+            "[%s] Analysis pipeline dispatched: pipeline_id=%s candidate=%s reason=%s assessment_id=%s "
+            "saved=%s total=%s segments=%s",
             session_id,
+            pipeline_id,
+            candidate_id,
             reason,
             assessment_id,
-            scheduled,
             saved_answers,
             len(response_fields),
+            len(state.get("segment_ids") or []),
         )
-        return scheduled
+        return True
 
     def _classify_agent_turn(text: str) -> str:
         """
@@ -861,14 +964,16 @@ async def agent_websocket(websocket: WebSocket):
             assessment_id,
         )
 
-    async def _write_and_extract_segment(
+    async def _write_segment_and_dispatch_signal(
         response_type: str,
         segment_text: str,
         sequence_order: int,
         question_id: str | None = None,
     ) -> None:
-        """Fire-and-forget: persist a response_segment row then extract signals."""
-        from app.services.intelligence import write_segment, extract_signals_for_segment
+        """Fire-and-forget: persist a response_segment row then dispatch signal extraction."""
+        from app.services.intelligence import write_segment
+        from app.tasks.signals import extract_signals
+
         db = SessionLocal()
         try:
             seg = await write_segment(
@@ -880,15 +985,21 @@ async def agent_websocket(websocket: WebSocket):
                 candidate_id=candidate_id,
                 question_id=question_id,
             )
-            await extract_signals_for_segment(
-                seg.id,
-                assessment_id,
-                candidate_id,
-                response_type,
-                segment_text,
+            segment_id = str(seg.id)
+            state["segment_ids"].append(segment_id)
+            task = extract_signals.apply_async(
+                args=[segment_id, candidate_id, assessment_id],
+                queue="signals",
+            )
+            task_registry.register_signal_task(segment_id, candidate_id, task.id)
+            logger.info(
+                "[%s] Signal extraction dispatched: task_id=%s segment=%s",
+                session_id,
+                task.id,
+                segment_id,
             )
         except Exception as exc:
-            logger.exception("[%s] Segment write/extract failed: %s", session_id, exc)
+            logger.exception("[%s] Segment write/dispatch failed: %s", session_id, exc)
         finally:
             db.close()
 
@@ -942,8 +1053,8 @@ async def agent_websocket(websocket: WebSocket):
 
         state["segment_sequence"] += 1
         response_type = response_fields[idx].replace("_response", "")
-        task = asyncio.create_task(
-            _write_and_extract_segment(
+        asyncio.create_task(
+            _write_segment_and_dispatch_signal(
                 response_type=response_type,
                 segment_text=text,
                 sequence_order=state["segment_sequence"],
@@ -951,8 +1062,6 @@ async def agent_websocket(websocket: WebSocket):
             ),
             name="segment-extract-final",
         )
-        from app.services.intelligence import register_signal_task
-        register_signal_task(assessment_id, task, candidate_id=candidate_id)
         state["current_question_finalized"] = True
         state["transcript_since_last_segment"] = ""
         _schedule_final_analysis_if_ready(reason)

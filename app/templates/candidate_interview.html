@@ -394,7 +394,7 @@
             return;
           }
 
-          if (status.status === "completed") {
+          if (status.status === "complete" || status.status === "completed") {
             setStatus("connected", "Interview complete. Your analysis is ready.");
             await loadResults();
             return;
@@ -402,7 +402,7 @@
           if (status.status === "failed") {
             setStatus("error", "Interview complete, but analysis failed. Please contact the team.");
             recommendationEl.textContent = "Processing failed before a recommendation could be generated.";
-            analysisEl.textContent = status.last_error || "An internal processing error occurred.";
+            analysisEl.textContent = status.error || status.last_error || "An internal processing error occurred.";
             metricFitEl.textContent = "-";
             metricConfidenceEl.textContent = "-";
             return;

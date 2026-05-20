@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import os
@@ -12,6 +13,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.db.models import AssessmentAccessLink, Assessments
+from app.services.cached_reads import invalidate_candidate_context
 
 INVALID_LINK_DETAIL = "Interview link unavailable."
 _OPEN_ATTEMPTS: dict[str, deque[float]] = defaultdict(deque)
@@ -144,11 +146,15 @@ def issue_assessment_access_link(
 
 def revoke_assessment_access_link(db: Session, link: AssessmentAccessLink) -> AssessmentAccessLink:
     now = utcnow()
+    candidate_id = str(link.candidate.id) if link.candidate else None
     try:
         link.revoked_at = now
         link.updated_at = now
         db.add(link)
         db.commit()
+        if candidate_id is not None:
+            # Revocation changes access state — invalidate candidate context cache
+            asyncio.run(invalidate_candidate_context(candidate_id))
         db.refresh(link)
         return link
     except Exception:

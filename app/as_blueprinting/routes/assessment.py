@@ -1,6 +1,9 @@
+import asyncio
 import uuid
 
+from celery.result import AsyncResult
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -25,6 +28,7 @@ from app.services.assessment_candidates import (
     refresh_candidate_result_snapshots,
     serialize_candidate,
 )
+from app.services.cached_reads import invalidate_assessment_cache
 from app.services.interview_links import (
     get_latest_assessment_access_link,
     issue_assessment_access_link,
@@ -38,7 +42,7 @@ ASSESSMENT_OVERVIEW_CODES = ("leadership_core", "mbti", "slii", "sii")
 
 
 class GenerateAssessmentsRequest(BaseModel):
-    job_requirements_id: int
+    job_requirements_id: int | None = None
     user_id: int
     assessment_type_code: str = "leadership_core"
     issue_one_time_link: bool = False
@@ -135,8 +139,98 @@ def save_assessment(
     db.flush()
     sync_assessment_items(db, row, items)
     db.commit()
+    # Assessment updated — invalidate definition and items cache
+    asyncio.run(invalidate_assessment_cache(str(row.id)))
     db.refresh(row)
     return row
+
+
+def _assessment_requires_job_requirements(assessment_type_code: str) -> bool:
+    return assessment_type_code == "leadership_core"
+
+
+def _create_bootstrap_job_requirements(
+    db: Session,
+    *,
+    assessment_type_code: str,
+) -> JobRequirements:
+    definition = get_assessment_definition(assessment_type_code)
+    row = JobRequirements(
+        job_id=f"{definition.code}-{uuid.uuid4()}",
+        requirement=f"{definition.name}: {definition.description}",
+        role_experience=definition.description,
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def _resolve_job_requirements_for_generation(
+    db: Session,
+    *,
+    assessment_type_code: str,
+    job_requirements_id: int | None,
+) -> tuple[JobRequirements | None, JobRequirements]:
+    if job_requirements_id is not None:
+        job = db.get(JobRequirements, job_requirements_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job requirements not found")
+        return job, job
+
+    if _assessment_requires_job_requirements(assessment_type_code):
+        raise HTTPException(
+            status_code=400,
+            detail="job_requirements_id is required for leadership_core assessments.",
+        )
+
+    bootstrap_job = _create_bootstrap_job_requirements(
+        db,
+        assessment_type_code=assessment_type_code,
+    )
+    return None, bootstrap_job
+
+
+def _serialize_generated_assessment(
+    db: Session,
+    assessment: Assessments,
+    *,
+    latest_link: AssessmentAccessLink | None = None,
+    raw_token: str | None = None,
+    base_url: str | None = None,
+) -> AssessmentQuestionOut:
+    items = [
+        AssessmentItemOut(**item)
+        for item in get_assessment_item_payloads(db, assessment)
+    ]
+    link_payload = serialize_link_status(
+        latest_link,
+        include_url=raw_token is not None,
+        raw_token=raw_token,
+        base_url=base_url,
+    )
+    return AssessmentQuestionOut(
+        id=assessment.id,
+        user_id=assessment.user_id,
+        job_requirements_id=assessment.job_requirements_id,
+        assessment_type_code=assessment.assessment_type_code,
+        assessment_version=assessment.assessment_version,
+        items=items,
+        behavioral_question=assessment.behavioral_question,
+        competency_based_question=assessment.competency_based_question,
+        situational_question=assessment.situational_question,
+        panel_question=assessment.panel_question,
+        business_case_question=assessment.business_case_question,
+        live_simulation_question=assessment.live_simulation_question,
+        psychometric_question=assessment.psychometric_question,
+        structured_reference_question=assessment.structured_reference_question,
+        culture_alignment_question=assessment.culture_alignment_question,
+        integrity_ethics_question=assessment.integrity_ethics_question,
+        latest_interview_link=(
+            InterviewLinkOut(**link_payload)
+            if link_payload is not None
+            else None
+        ),
+    )
 
 
 def _require_owned_assessment(db: Session, assessment_id: int, current_user_id: int) -> Assessments:
@@ -158,36 +252,25 @@ def generate_and_save_assessments(
     """Generate an assessment instance from a reusable assessment type definition."""
     if body.user_id != current_user_id:
         raise HTTPException(status_code=403, detail="Assessments can only be generated for the authenticated user.")
-    job = db.get(JobRequirements, body.job_requirements_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job requirements not found")
-    ensure_assessment_types_seeded(db)
     definition = get_assessment_definition(body.assessment_type_code)
-    items = build_assessment_items(definition, job=job)
+    generation_job, persisted_job = _resolve_job_requirements_for_generation(
+        db,
+        assessment_type_code=definition.code,
+        job_requirements_id=body.job_requirements_id,
+    )
+    items = build_assessment_items(definition, job=generation_job)
     assessment = save_assessment(
         db,
         user_id=current_user_id,
-        job_requirements_id=body.job_requirements_id,
+        job_requirements_id=persisted_job.id,
         assessment_type_code=definition.code,
         assessment_version=definition.version,
         items=items,
     )
-    index_assessment(db, assessment, job)
-    item_payloads = get_assessment_item_payloads(db, assessment)
-    response_payload = {
-        "id": assessment.id,
-        "user_id": assessment.user_id,
-        "job_requirements_id": assessment.job_requirements_id,
-        "assessment_type_code": assessment.assessment_type_code,
-        "assessment_version": assessment.assessment_version,
-        "items": item_payloads,
-    }
-    if assessment.assessment_type_code == "leadership_core":
-        for template in LEADERSHIP_ITEM_TEMPLATES:
-            response_payload[template.key] = getattr(assessment, template.key, None)
-    latest_link_payload = None
+    latest_link = None
+    raw_token = None
     if body.issue_one_time_link:
-        link, raw_token = issue_assessment_access_link(
+        latest_link, raw_token = issue_assessment_access_link(
             db,
             assessment_id=assessment.id,
             created_by_user_id=current_user_id,
@@ -195,14 +278,13 @@ def generate_and_save_assessments(
             issued_reason=body.issued_reason,
             ttl_hours=body.link_ttl_hours,
         )
-        latest_link_payload = serialize_link_status(
-            link,
-            include_url=True,
-            raw_token=raw_token,
-            base_url=str(request.base_url).rstrip("/"),
-        )
-    response_payload["latest_interview_link"] = latest_link_payload
-    return AssessmentQuestionOut(**response_payload)
+    return _serialize_generated_assessment(
+        db,
+        assessment,
+        latest_link=latest_link,
+        raw_token=raw_token,
+        base_url=str(request.base_url).rstrip("/"),
+    )
 
 
 @router.post("/generate-from-linkedin-job", response_model=AssessmentQuestionOut)
@@ -215,58 +297,35 @@ def generate_assessment_from_linkedin_job(
     """Fetch a LinkedIn job post via Bright Data and generate an assessment from it."""
     if body.user_id != current_user_id:
         raise HTTPException(status_code=403, detail="Assessments can only be generated for the authenticated user.")
-    try:
-        posting = fetch_linkedin_job_posting(body.linkedin_job_url)
-    except BrightDataError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    from app.tasks.assessment import dispatch_linkedin_assessment_chain
 
-    job_description = build_job_description_from_linkedin_payload(posting)
-    analyzed = analyze_job_description(job_description)
-    job_id = str(posting.get("job_posting_id") or uuid.uuid4())
-    job = insert_job_requirements(db, job_id, analyzed)
-
-    ensure_assessment_types_seeded(db)
-    definition = get_assessment_definition(body.assessment_type_code)
-    items = build_assessment_items(definition, job=job)
-    assessment = save_assessment(
-        db,
-        user_id=current_user_id,
-        job_requirements_id=job.id,
-        assessment_type_code=definition.code,
-        assessment_version=definition.version,
-        items=items,
+    task_id = dispatch_linkedin_assessment_chain(
+        linkedin_url=body.linkedin_job_url,
+        owner_user_id=str(current_user_id),
     )
-    index_assessment(db, assessment, job)
-    item_payloads = get_assessment_item_payloads(db, assessment)
-    response_payload = {
-        "id": assessment.id,
-        "user_id": assessment.user_id,
-        "job_requirements_id": assessment.job_requirements_id,
-        "assessment_type_code": assessment.assessment_type_code,
-        "assessment_version": assessment.assessment_version,
-        "items": item_payloads,
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status": "accepted",
+            "task_id": task_id,
+            "poll_url": f"/assessments/task-status/{task_id}",
+        },
+    )
+
+
+@router.get("/task-status/{task_id}")
+async def get_assessment_task_status(
+    task_id: str,
+    current_user_id: int = Depends(get_current_user_id),
+):
+    result = AsyncResult(task_id)
+    return {
+        "task_id": task_id,
+        "state": result.state,
+        "ready": result.ready(),
+        "successful": result.successful() if result.ready() else None,
+        "result": result.result if result.successful() else None,
     }
-    if assessment.assessment_type_code == "leadership_core":
-        for template in LEADERSHIP_ITEM_TEMPLATES:
-            response_payload[template.key] = getattr(assessment, template.key, None)
-    latest_link_payload = None
-    if body.issue_one_time_link:
-        link, raw_token = issue_assessment_access_link(
-            db,
-            assessment_id=assessment.id,
-            created_by_user_id=current_user_id,
-            candidate_email=body.candidate_email,
-            issued_reason=body.issued_reason,
-            ttl_hours=body.link_ttl_hours,
-        )
-        latest_link_payload = serialize_link_status(
-            link,
-            include_url=True,
-            raw_token=raw_token,
-            base_url=str(request.base_url).rstrip("/"),
-        )
-    response_payload["latest_interview_link"] = latest_link_payload
-    return AssessmentQuestionOut(**response_payload)
 
 
 @router.post("/{assessment_id}/invite-link", response_model=InterviewLinkOut)

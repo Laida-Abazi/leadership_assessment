@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import html
+from dataclasses import asdict
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
@@ -22,16 +24,31 @@ from app.routers.intelligence import (
     build_status_response,
 )
 from app.services.assessment_candidates import (
+    CandidateRegistrationContext,
     get_candidate_registration_context,
     refresh_candidate_result_snapshots,
     register_candidate_for_link,
 )
 from app.services.assessment_persistence import clear_assessment_interview_state
+from app.services.cached_reads import get_candidate_context_cached, invalidate_candidate_context
 from app.services.interview_links import (
     enforce_link_open_rate_limit,
 )
+from app.services.task_registry import task_registry
 
 router = APIRouter(prefix="/candidate", tags=["candidate"])
+
+
+def _serialize_candidate_registration_context(context: CandidateRegistrationContext) -> dict:
+    return asdict(context)
+
+
+def _deserialize_candidate_registration_context(payload: dict) -> CandidateRegistrationContext:
+    return CandidateRegistrationContext(
+        assessment_id=int(payload["assessment_id"]),
+        assessment_type_code=payload["assessment_type_code"],
+        candidate_email=payload.get("candidate_email"),
+    )
 
 
 def _get_candidate_for_link(db: Session, link_id: int) -> AssessmentCandidate:
@@ -61,10 +78,20 @@ def serve_candidate_interview_page(
 
 
 @router.get("/interview/{raw_token}", response_class=HTMLResponse)
-def open_candidate_interview(raw_token: str, request: Request, db: Session = Depends(get_db)):
+async def open_candidate_interview(raw_token: str, request: Request, db: Session = Depends(get_db)):
     client_ip = getattr(getattr(request, "client", None), "host", None)
     enforce_link_open_rate_limit(client_ip)
-    context = get_candidate_registration_context(db, raw_token)
+
+    async def _fetch_candidate_context(cache_key: str) -> dict:
+        return _serialize_candidate_registration_context(
+            get_candidate_registration_context(db, cache_key)
+        )
+
+    context_payload = await get_candidate_context_cached(
+        candidate_id=raw_token,
+        fetch_fn=_fetch_candidate_context,
+    )
+    context = _deserialize_candidate_registration_context(context_payload)
     path = Path(__file__).resolve().parent.parent / "templates" / "candidate_identity_form.html"
     if not path.exists():
         raise FileNotFoundError(f"Template not found: {path}")
@@ -112,6 +139,7 @@ def begin_candidate_interview(
         secure=request.url.scheme == "https",
         max_age=CANDIDATE_SESSION_EXPIRE_MINUTES * 60,
     )
+    asyncio.run(invalidate_candidate_context(raw_token))
     return redirect
 
 
@@ -148,6 +176,8 @@ def get_candidate_analysis(
     db: Session = Depends(get_db),
 ):
     candidate = _get_candidate_for_link(db, context.link_id)
+    if task_registry.is_analysis_running(str(candidate.id)):
+        return {"status": "processing", "message": "Analysis is still being generated"}
     refresh_candidate_result_snapshots(db, [candidate])
     return build_analysis_response(db, assessment_id, candidate_id=candidate.id)
 
@@ -159,5 +189,7 @@ def get_candidate_predictions(
     db: Session = Depends(get_db),
 ):
     candidate = _get_candidate_for_link(db, context.link_id)
+    if task_registry.is_analysis_running(str(candidate.id)):
+        return {"status": "processing", "message": "Analysis is still being generated"}
     refresh_candidate_result_snapshots(db, [candidate])
     return build_predictions_response(db, assessment_id, candidate_id=candidate.id)

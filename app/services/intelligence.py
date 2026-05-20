@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import statistics
-import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any
@@ -33,13 +32,14 @@ from app.db.models import (
 from app.db.models.job_requirement_profile import JobRequirementProfile
 from app.services.assessment_persistence import ensure_responses_row, iter_assessment_answers
 from app.services.assessment_scoring import evaluate_assessment
+from app.services.task_registry import task_registry
 
 logger = logging.getLogger(__name__)
 
 AnalysisScopeKey = int | tuple[int, int]
 
-_PENDING_SIGNAL_TASKS: dict[AnalysisScopeKey, set[asyncio.Task]] = defaultdict(set)
-_ANALYSIS_TASKS: dict[AnalysisScopeKey, asyncio.Task] = {}
+# REMOVED: In-memory task tracking replaced by Redis-backed TaskRegistry.
+# See app/services/task_registry.py. These dicts broke silently under multiple Uvicorn workers.
 _ANALYSIS_STATE: dict[AnalysisScopeKey, dict[str, Any]] = {}
 
 # ---------------------------------------------------------------------------
@@ -100,18 +100,16 @@ def _set_analysis_state(
 
 
 def reset_intelligence_scope(assessment_id: int, *, candidate_id: int | None = None) -> None:
-    """Cancel and clear any in-memory intelligence work for this scope."""
+    """Clear tracked orchestration state for this scope."""
+    if candidate_id is not None:
+        task_registry.clear_candidate_tasks(candidate_id)
+    else:
+        logger.info(
+            "[intelligence] reset_intelligence_scope skipped task registry clear without candidate_id "
+            "(assessment_id=%s)",
+            assessment_id,
+        )
     key = _scope_key(assessment_id, candidate_id)
-
-    analysis_task = _ANALYSIS_TASKS.pop(key, None)
-    if analysis_task and not analysis_task.done():
-        analysis_task.cancel()
-
-    pending_tasks = list(_PENDING_SIGNAL_TASKS.pop(key, set()))
-    for task in pending_tasks:
-        if not task.done():
-            task.cancel()
-
     _ANALYSIS_STATE.pop(key, None)
 
 # Role-fit recommendation thresholds (tune as needed).
@@ -135,21 +133,23 @@ async def _responses_create_async(client: openai.OpenAI, **kwargs):
     return await asyncio.to_thread(client.responses.create, **kwargs)
 
 
-def register_signal_task(assessment_id: int, task: asyncio.Task, *, candidate_id: int | None = None) -> None:
-    """Track background signal extraction tasks so final analysis can await them."""
-    key = _scope_key(assessment_id, candidate_id)
-    tasks = _PENDING_SIGNAL_TASKS[key]
-    tasks.add(task)
-
-    def _cleanup(done_task: asyncio.Task) -> None:
-        current = _PENDING_SIGNAL_TASKS.get(key)
-        if not current:
-            return
-        current.discard(done_task)
-        if not current:
-            _PENDING_SIGNAL_TASKS.pop(key, None)
-
-    task.add_done_callback(_cleanup)
+def register_signal_task(
+    segment_id: int | str,
+    task_id: str,
+    *,
+    candidate_id: int | None = None,
+) -> None:
+    """Register a dispatched signal task in the Redis-backed registry."""
+    normalized_task_id = task_id
+    if not isinstance(task_id, str):
+        normalized_task_id = f"legacy-asyncio-task-{id(task_id)}"
+        logger.warning(
+            "[intelligence] register_signal_task received legacy asyncio task object for segment_id=%s; "
+            "using fallback task_id=%s until Celery dispatch is fully migrated",
+            segment_id,
+            normalized_task_id,
+        )
+    task_registry.register_signal_task(str(segment_id), candidate_id, normalized_task_id)
 
 
 def get_intelligence_status(assessment_id: int, *, candidate_id: int | None = None) -> dict[str, Any]:
@@ -185,41 +185,37 @@ def get_intelligence_status(assessment_id: int, *, candidate_id: int | None = No
         db.close()
 
     key = _scope_key(assessment_id, candidate_id)
-    analysis_task = _ANALYSIS_TASKS.get(key)
-    pending_signal_tasks = [
-        task
-        for task in _PENDING_SIGNAL_TASKS.get(key, set())
-        if not task.done()
-    ]
+    pending_signal_task_ids = task_registry.get_signal_task_ids(candidate_id)
+    registry_analysis_running = bool(
+        task_registry.is_analysis_running(candidate_id) or task_registry.get_pipeline_id(candidate_id)
+    )
     state = dict(_ANALYSIS_STATE.get(key, {}))
     status_value = state.get("status")
     if not status_value:
-        if analysis_task and not analysis_task.done():
-            status_value = "pending" if pending_signal_tasks else "running"
-        elif prediction is not None or analysis is not None:
+        if prediction is not None or analysis is not None:
             status_value = "completed"
-        elif pending_signal_tasks or segment_count > 0:
+        elif registry_analysis_running:
+            status_value = "running"
+        elif pending_signal_task_ids or segment_count > 0:
             status_value = "pending"
         else:
             status_value = "pending"
     elif (
         status_value in {"pending", "running"}
-        and (not analysis_task or analysis_task.done())
-        and not pending_signal_tasks
         and (prediction is not None or analysis is not None)
     ):
-        # Prefer durable DB state over stale in-memory flags after reloads/reconnects.
+        # Prefer durable DB state over stale in-process flags after reloads/reconnects.
         status_value = "completed"
 
     return {
         "assessment_id": assessment_id,
         "candidate_id": candidate_id,
         "status": status_value,
-        "pending_signal_tasks": len(pending_signal_tasks),
+        "pending_signal_tasks": len(pending_signal_task_ids),
         "segment_count": segment_count,
         "signal_count": signal_count,
         "signals_ready": segment_count == 0 or signal_count >= segment_count,
-        "analysis_running": status_value == "running",
+        "analysis_running": registry_analysis_running or status_value == "running",
         "analysis_ready": analysis is not None,
         "prediction_ready": prediction is not None,
         "failed": status_value == "failed",
@@ -237,30 +233,15 @@ async def _await_registered_signal_tasks(
     candidate_id: int | None = None,
     max_wait_seconds: int = 60,
 ) -> None:
-    """Wait for any in-flight signal extraction tasks registered for this assessment."""
-    key = _scope_key(assessment_id, candidate_id)
-    deadline = time.monotonic() + max_wait_seconds
-    while True:
-        pending = [
-            task
-            for task in _PENDING_SIGNAL_TASKS.get(key, set())
-            if not task.done()
-        ]
-        if not pending:
-            return
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            logger.warning(
-                "[intelligence] timed out waiting for %s signal tasks (assessment_id=%s)",
-                len(pending),
-                assessment_id,
-            )
-            return
-        await asyncio.wait(
-            pending,
-            timeout=min(remaining, 5.0),
-            return_when=asyncio.ALL_COMPLETED,
-        )
+    """Deprecated no-op retained for compatibility with legacy async callers."""
+    logger.debug(
+        "[intelligence] _await_registered_signal_tasks is deprecated; Celery chord now coordinates "
+        "signal extraction for assessment_id=%s candidate_id=%s max_wait_seconds=%s",
+        assessment_id,
+        candidate_id,
+        max_wait_seconds,
+    )
+    return None
 
 
 def schedule_final_analysis(
@@ -271,84 +252,48 @@ def schedule_final_analysis(
     max_wait_seconds: int = 60,
     retry_attempts: int = FINAL_ANALYSIS_RETRY_ATTEMPTS,
     retry_delay_seconds: float = FINAL_ANALYSIS_RETRY_DELAY_SECONDS,
-) -> bool:
+) -> str:
     """
-    Schedule exactly one final-analysis background task for an assessment.
+    Dispatch the Celery-backed final-analysis pipeline for an assessment.
 
-    The task waits for any registered segment/signal extraction jobs to finish,
-    then runs the analysis pipeline once.
+    Signals and final analysis are coordinated by a Celery chord, so this call is
+    now fire-and-forget and returns the pipeline ID immediately.
     """
-    key = _scope_key(assessment_id, candidate_id)
-    existing = _ANALYSIS_TASKS.get(key)
-    if existing and not existing.done():
-        return False
+    db = SessionLocal()
+    try:
+        segment_ids = [
+            str(segment_id)
+            for (segment_id,) in (
+                _apply_candidate_scope(
+                    db.query(ResponseSegment.id).filter(ResponseSegment.assessment_id == assessment_id),
+                    ResponseSegment,
+                    candidate_id,
+                )
+                .order_by(ResponseSegment.id.asc())
+                .all()
+            )
+        ]
+    finally:
+        db.close()
 
     _set_analysis_state(assessment_id, "pending", candidate_id=candidate_id, attempts=0)
+    from app.tasks.analysis import dispatch_analysis_chord
 
-    async def _runner() -> None:
-        attempt = 0
-        try:
-            while True:
-                attempt += 1
-                try:
-                    logger.info(
-                        "[intelligence] final analysis scheduled: assessment_id=%s attempt=%s",
-                        assessment_id,
-                        attempt,
-                    )
-                    _set_analysis_state(assessment_id, "pending", candidate_id=candidate_id, attempts=attempt)
-                    await _await_registered_signal_tasks(
-                        assessment_id,
-                        candidate_id=candidate_id,
-                        max_wait_seconds=max_wait_seconds,
-                    )
-                    _set_analysis_state(assessment_id, "running", candidate_id=candidate_id, attempts=attempt)
-                    await run_full_analysis_chained(
-                        assessment_id=assessment_id,
-                        job_requirements_id=job_requirements_id,
-                        candidate_id=candidate_id,
-                        rebuild_from_responses=False,
-                        max_wait_seconds=max_wait_seconds,
-                    )
-                    logger.info(
-                        "[intelligence] final analysis completed: assessment_id=%s attempt=%s",
-                        assessment_id,
-                        attempt,
-                    )
-                    _set_analysis_state(assessment_id, "completed", candidate_id=candidate_id, attempts=attempt)
-                    return
-                except Exception as exc:
-                    logger.exception(
-                        "[intelligence] schedule_final_analysis failed for assessment_id=%s: %s",
-                        assessment_id,
-                        exc,
-                    )
-                    if attempt > retry_attempts:
-                        _set_analysis_state(
-                            assessment_id,
-                            "failed",
-                            candidate_id=candidate_id,
-                            attempts=attempt,
-                            error=str(exc),
-                        )
-                        return
-                    _set_analysis_state(
-                        assessment_id,
-                        "pending",
-                        candidate_id=candidate_id,
-                        attempts=attempt,
-                        error=str(exc),
-                    )
-                    await asyncio.sleep(retry_delay_seconds)
-        finally:
-            _ANALYSIS_TASKS.pop(key, None)
-
-    task = asyncio.create_task(
-        _runner(),
-        name=f"final-analysis-{assessment_id}-{candidate_id or 'assessment'}",
+    pipeline_id = dispatch_analysis_chord(candidate_id, assessment_id, segment_ids)
+    logger.info(
+        "[intelligence] final analysis pipeline dispatched: assessment_id=%s candidate_id=%s pipeline_id=%s "
+        "segments=%s max_wait_seconds=%s retry_attempts=%s retry_delay_seconds=%s "
+        "job_requirements_id=%s",
+        assessment_id,
+        candidate_id,
+        pipeline_id,
+        len(segment_ids),
+        max_wait_seconds,
+        retry_attempts,
+        retry_delay_seconds,
+        job_requirements_id,
     )
-    _ANALYSIS_TASKS[key] = task
-    return True
+    return pipeline_id
 
 
 _SIGNAL_EXTRACTION_SYSTEM = (
@@ -699,6 +644,47 @@ async def extract_signals_for_segment(
         return None
     finally:
         db.close()
+
+
+def _coerce_optional_int(value: str | int | None) -> int | None:
+    if value in (None, "", "None"):
+        return None
+    return int(value)
+
+
+def extract_signals_for_segment_sync(
+    segment_id: str | int,
+    candidate_id: str | int | None,
+    assessment_id: str | int,
+) -> ResponseSignal | None:
+    """Sync bridge for Celery workers that need the async segment extractor."""
+    parsed_segment_id = int(segment_id)
+    parsed_assessment_id = int(assessment_id)
+    parsed_candidate_id = _coerce_optional_int(candidate_id)
+
+    db = SessionLocal()
+    try:
+        segment = db.query(ResponseSegment).filter(ResponseSegment.id == parsed_segment_id).first()
+        if not segment:
+            logger.warning(
+                "[intelligence] extract_signals_for_segment_sync missing segment_id=%s",
+                parsed_segment_id,
+            )
+            return None
+        response_type = segment.response_type or ""
+        segment_text = segment.segment_text or ""
+    finally:
+        db.close()
+
+    return asyncio.run(
+        extract_signals_for_segment(
+            segment_id=parsed_segment_id,
+            assessment_id=parsed_assessment_id,
+            candidate_id=parsed_candidate_id,
+            response_type=response_type,
+            segment_text=segment_text,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1185,6 +1171,36 @@ async def run_full_analysis_chained(
         assessment_id,
     )
     await run_full_analysis(assessment_id, job_requirements_id, candidate_id=candidate_id)
+
+
+def run_full_analysis_chained_sync(
+    candidate_id: str | int | None,
+    assessment_id: str | int,
+) -> None:
+    """Sync bridge for Celery workers that need the async analysis pipeline."""
+    parsed_assessment_id = int(assessment_id)
+    parsed_candidate_id = _coerce_optional_int(candidate_id)
+
+    db = SessionLocal()
+    try:
+        assessment = db.get(Assessments, parsed_assessment_id)
+        if not assessment:
+            raise RuntimeError(f"Assessment not found for id={parsed_assessment_id}")
+        if assessment.job_requirements_id is None:
+            raise RuntimeError(
+                f"Assessment {parsed_assessment_id} is missing job_requirements_id for analysis"
+            )
+        job_requirements_id = assessment.job_requirements_id
+    finally:
+        db.close()
+
+    asyncio.run(
+        run_full_analysis_chained(
+            assessment_id=parsed_assessment_id,
+            job_requirements_id=job_requirements_id,
+            candidate_id=parsed_candidate_id,
+        )
+    )
 
 
 async def _bootstrap_segments_from_legacy_responses(

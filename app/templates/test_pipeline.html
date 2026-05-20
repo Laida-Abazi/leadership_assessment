@@ -1085,23 +1085,8 @@
       }
     }
 
-    async function ensureMbtiJobRequirements() {
-      if (state.mbtiBootstrapJobRequirementsId) {
-        document.getElementById("jobReqId").value = state.mbtiBootstrapJobRequirementsId;
-        return state.mbtiBootstrapJobRequirementsId;
-      }
-      const form = new FormData();
-      form.append("job_description", MBTI_BOOTSTRAP_JOB_DESCRIPTION);
-      const res = await apiFetch("/job-requirements/analyze", { method: "POST", body: form });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || res.statusText);
-      }
-      const data = await res.json();
-      state.mbtiBootstrapJobRequirementsId = data.id;
-      state.jobRequirementsId = data.id;
-      document.getElementById("jobReqId").value = data.id;
-      return data.id;
+    function assessmentNeedsJobRequirements(assessmentTypeCode) {
+      return assessmentTypeCode === "leadership_core";
     }
 
     async function generateAssessment() {
@@ -1111,7 +1096,7 @@
       const candidateEmail = document.getElementById("candidateEmail").value.trim();
       const linkTtlHours = parseInt(document.getElementById("linkTtlHours").value, 10) || 48;
       if (!userId) { alert("Fill in the User ID."); return; }
-      if (assessmentTypeCode !== "mbti" && !jobReqId) {
+      if (assessmentNeedsJobRequirements(assessmentTypeCode) && !jobReqId) {
         alert("Fill in both Job Requirements ID and User ID.");
         return;
       }
@@ -1122,20 +1107,14 @@
       document.getElementById("phase2Continue").style.display = "none";
 
       try {
-        if (assessmentTypeCode === "mbti" && !jobReqId) {
-          showStatus("phase2", "loading", "Preparing MBTI assessment...");
-          jobReqId = await ensureMbtiJobRequirements();
-        }
-        if (!jobReqId || !userId) {
-          throw new Error(assessmentTypeCode === "mbti"
-            ? "Unable to prepare the MBTI assessment context."
-            : "Fill in both Job Requirements ID and User ID.");
+        if (assessmentNeedsJobRequirements(assessmentTypeCode) && !jobReqId) {
+          throw new Error("Fill in both Job Requirements ID and User ID.");
         }
         const res = await apiFetch("/assessments/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            job_requirements_id: jobReqId,
+            job_requirements_id: jobReqId || null,
             user_id: userId,
             assessment_type_code: assessmentTypeCode,
             issue_one_time_link: true,

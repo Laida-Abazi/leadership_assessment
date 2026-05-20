@@ -1,0 +1,41 @@
+version: "3.9"
+
+services:
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    container_name: rabbitmq-local
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: devuser
+      RABBITMQ_DEFAULT_PASS: devpass
+    volumes:
+      - rabbitmq_dev_data:/var/lib/rabbitmq
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: redis-local
+    ports:
+      - "6379:6379"
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_dev_data:/data
+
+  flower:
+    image: mher/flower:2.0
+    container_name: flower-local
+    ports:
+      - "5555:5555"
+    environment:
+      CELERY_BROKER_URL: amqp://devuser:devpass@rabbitmq:5672//
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    command: celery flower --broker=amqp://devuser:devpass@rabbitmq:5672// --port=5555
+    depends_on:
+      - rabbitmq
+      - redis
+    restart: unless-stopped
+
+volumes:
+  rabbitmq_dev_data:
+  redis_dev_data:
