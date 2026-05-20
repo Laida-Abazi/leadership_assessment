@@ -2,4 +2,6 @@
 *.sh text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
-Dockerfile text eol=lf
+Dockerfile text eol=lfDockerfile text eol=lf
+alembic.ini text eol=lf
+alembic.ini text eol=lf
