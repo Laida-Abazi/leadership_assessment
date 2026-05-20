@@ -7,3 +7,11 @@ venv
 *.egg-info
 .mypy_cache
 .pytest_cache
+.env
+app/.env
+**/.env
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+.git
