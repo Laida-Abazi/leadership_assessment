@@ -319,8 +319,9 @@ Return ONLY a JSON object — no preamble, no markdown, no explanation:
 
 _NARRATIVE_SYSTEM = (
     "You are a senior hiring evaluator. "
-    "Write a concise, professional role-fit summary based on aggregated interview evidence. "
+    "Write a substantially detailed, professional role-fit report based on aggregated interview evidence. "
     "Focus on competencies required by the role, execution quality, and job-requirement alignment. "
+    "Use explicit section headings, evidence-grounded observations, and practical hiring implications. "
     "Avoid personality judgments not supported by evidence."
 )
 
@@ -1302,20 +1303,57 @@ def _chunk_text(text: str, chunk_size: int = 700) -> list[str]:
 # ---------------------------------------------------------------------------
 
 async def _generate_narrative(aggregated_data: dict, fit_data: dict) -> str:
-    """Call GPT-5.2 to produce a role-fit narrative summary."""
+    """Call GPT-5.2 to produce a detailed role-fit narrative report."""
     top_traits = aggregated_data.get("top_traits", [])
     contradictions = aggregated_data.get("contradictions", [])
     fit_score = fit_data.get("fit_score")
     trait_gaps = fit_data.get("trait_gaps", {})
+    coverage_by_category = fit_data.get("coverage_by_category", {})
+    aggregated_traits = aggregated_data.get("aggregated_traits") or {}
+    behavioral_patterns = aggregated_data.get("behavioral_patterns") or {}
+
+    top_trait_evidence = []
+    for trait_name in top_traits[:8]:
+        trait_data = aggregated_traits.get(trait_name)
+        if not isinstance(trait_data, dict):
+            continue
+        top_trait_evidence.append(
+            {
+                "trait": trait_name,
+                "mean_confidence": trait_data.get("mean_confidence"),
+                "count": trait_data.get("count")
+                or trait_data.get("occurrences")
+                or trait_data.get("mentions"),
+                "strength_examples": (trait_data.get("strength_examples") or [])[:2],
+                "risk_examples": (trait_data.get("risk_examples") or [])[:2],
+            }
+        )
 
     user_content = (
         f"Top observed competencies: {', '.join(top_traits) or 'none detected'}.\n"
-        f"Observed contradictions/gaps: {json.dumps(contradictions)}.\n"
+        f"Top trait evidence: {json.dumps(top_trait_evidence, ensure_ascii=True)}.\n"
+        f"Behavioral patterns: {json.dumps(behavioral_patterns, ensure_ascii=True)}.\n"
+        f"Observed contradictions/gaps: {json.dumps(contradictions, ensure_ascii=True)}.\n"
         f"Job fit score: {fit_score if fit_score is not None else 'not computed (no profile)'}.\n"
-        f"Competency gaps by category: {json.dumps(trait_gaps)}.\n\n"
-        "Write a concise 2-4 paragraph professional summary focused on role fit: "
-        "where competency evidence is strong, where gaps remain, and whether evidence supports readiness for this role. "
-        "Adapt naturally to the role type (technical, product, operations, people, etc.) based on the job requirements."
+        f"Coverage by competency category: {json.dumps(coverage_by_category, ensure_ascii=True)}.\n"
+        f"Competency gaps by category: {json.dumps(trait_gaps, ensure_ascii=True)}.\n\n"
+        "Write a substantially detailed evaluator report with these exact section headings, in this order:\n"
+        "Executive Summary:\n"
+        "Evidence Of Strength:\n"
+        "Role-Fit By Competency Area:\n"
+        "Risks, Gaps, And Contradictions:\n"
+        "Delivery And Collaboration Implications:\n"
+        "Hiring Recommendation Rationale:\n"
+        "Targeted Follow-Up Questions:\n\n"
+        "Requirements:\n"
+        "- Use plain text only, no markdown fences.\n"
+        "- Under each heading, write 2-5 sentences or short bullet-style lines grounded in the evidence.\n"
+        "- Explain where evidence is strong, where it is thin, and what that means for real job performance.\n"
+        "- In Role-Fit By Competency Area, interpret the coverage data category by category.\n"
+        "- In Risks, Gaps, And Contradictions, distinguish between missing evidence and true negative evidence.\n"
+        "- In Hiring Recommendation Rationale, state whether the evidence suggests role-ready, partially aligned, or not yet role-ready, and why.\n"
+        "- In Targeted Follow-Up Questions, include 3-5 focused follow-up questions to validate unresolved areas.\n"
+        "- Keep the report comprehensive and readable, roughly 700-1200 words when evidence allows."
     )
 
     try:
@@ -1323,7 +1361,7 @@ async def _generate_narrative(aggregated_data: dict, fit_data: dict) -> str:
         response = await _responses_create_async(
             client,
             model=INTELLIGENCE_MODEL,
-            max_output_tokens=1024,
+            max_output_tokens=2200,
             reasoning={"effort": REASONING_EFFORT_NARRATIVE},
             instructions=_NARRATIVE_SYSTEM,
             input=user_content,

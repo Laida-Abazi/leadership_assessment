@@ -1264,14 +1264,14 @@
         const analysisData = await aRes.json();
         const analysisText = (analysisData.analysis_text || "").trim();
 
-        const htmlParts = [];
-        if (analysisText) {
-          htmlParts.push('<div class="analysis-body">' + escapeHtml(analysisText) + '</div>');
-        }
-        if (!htmlParts.length) {
-          htmlParts.push('<div class="analysis-body">No intelligence analysis returned yet. Try again in a moment.</div>');
-        }
-        document.getElementById("rationaleText").innerHTML = htmlParts.join("");
+        const rationale =
+          pred && typeof pred.hiring_recommendation === "string"
+            ? pred.hiring_recommendation.trim()
+            : "";
+        document.getElementById("rationaleText").innerHTML = formatAnalysisContent(
+          analysisText,
+          rationale
+        );
 
         hideStatus("phase4");
         document.getElementById("phase4Result").classList.add("visible");
