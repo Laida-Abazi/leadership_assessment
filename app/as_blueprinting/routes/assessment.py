@@ -1,4 +1,5 @@
 import asyncio
+import os
 import uuid
 
 from celery.result import AsyncResult
@@ -14,7 +15,7 @@ from app.as_requirements.routes.ai_analysis import (
 )
 from app.auth.login.deps import get_current_user_id
 from app.db import get_db
-from app.db.models import Analysis, AssessmentAccessLink, AssessmentCandidate, Assessments, JobRequirements
+from app.db.models import Analysis, AssessmentAccessLink, AssessmentCandidate, Assessments, JobRequirements, User
 from app.routers.intelligence import build_status_response
 from app.rag.embeddings import get_context_for_agent, index_assessment
 from app.services.assessment_persistence import get_assessment_item_payloads, sync_assessment_items
@@ -38,7 +39,9 @@ from app.services.interview_links import (
 from app.services.brightdata_linkedin import BrightDataError, fetch_linkedin_job_posting
 
 router = APIRouter(prefix="/assessments", tags=["assessments"])
+public_router = APIRouter(prefix="/assessments/public", tags=["assessments-public"])
 ASSESSMENT_OVERVIEW_CODES = ("leadership_core", "mbti", "slii", "sii")
+MBTI_PUBLIC_OWNER_USER_ID = int(os.getenv("MBTI_PUBLIC_OWNER_USER_ID", "1"))
 
 
 class GenerateAssessmentsRequest(BaseModel):
@@ -111,6 +114,11 @@ class IssueInterviewLinkRequest(BaseModel):
     candidate_email: str | None = None
     issued_reason: str | None = None
     ttl_hours: int | None = None
+
+
+class PublicMbtiAssessmentRequest(BaseModel):
+    candidate_email: str | None = None
+    link_ttl_hours: int | None = None
 
 
 def save_assessment(
@@ -242,6 +250,89 @@ def _require_owned_assessment(db: Session, assessment_id: int, current_user_id: 
     return assessment
 
 
+def _resolve_mbti_public_owner_user_id(db: Session) -> int:
+    owner = db.get(User, MBTI_PUBLIC_OWNER_USER_ID)
+    if not owner:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "MBTI public creation is not configured. "
+                f"Set MBTI_PUBLIC_OWNER_USER_ID to an existing user id."
+            ),
+        )
+    return owner.id
+
+
+def _generate_and_save_assessment(
+    db: Session,
+    *,
+    request: Request,
+    owner_user_id: int,
+    assessment_type_code: str,
+    job_requirements_id: int | None,
+    issue_one_time_link: bool,
+    created_by_user_id: int | None,
+    candidate_email: str | None = None,
+    issued_reason: str | None = None,
+    link_ttl_hours: int | None = None,
+) -> AssessmentQuestionOut:
+    definition = get_assessment_definition(assessment_type_code)
+    generation_job, persisted_job = _resolve_job_requirements_for_generation(
+        db,
+        assessment_type_code=definition.code,
+        job_requirements_id=job_requirements_id,
+    )
+    items = build_assessment_items(definition, job=generation_job)
+    assessment = save_assessment(
+        db,
+        user_id=owner_user_id,
+        job_requirements_id=persisted_job.id,
+        assessment_type_code=definition.code,
+        assessment_version=definition.version,
+        items=items,
+    )
+    latest_link = None
+    raw_token = None
+    if issue_one_time_link:
+        latest_link, raw_token = issue_assessment_access_link(
+            db,
+            assessment_id=assessment.id,
+            created_by_user_id=created_by_user_id,
+            candidate_email=candidate_email,
+            issued_reason=issued_reason,
+            ttl_hours=link_ttl_hours,
+        )
+    return _serialize_generated_assessment(
+        db,
+        assessment,
+        latest_link=latest_link,
+        raw_token=raw_token,
+        base_url=str(request.base_url).rstrip("/"),
+    )
+
+
+@public_router.post("/mbti", response_model=AssessmentQuestionOut)
+def create_public_mbti_assessment(
+    body: PublicMbtiAssessmentRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Create an MBTI assessment without authentication and return a one-time interview link."""
+    owner_user_id = _resolve_mbti_public_owner_user_id(db)
+    return _generate_and_save_assessment(
+        db,
+        request=request,
+        owner_user_id=owner_user_id,
+        assessment_type_code="mbti",
+        job_requirements_id=None,
+        issue_one_time_link=True,
+        created_by_user_id=owner_user_id,
+        candidate_email=body.candidate_email,
+        issued_reason="public_mbti",
+        link_ttl_hours=body.link_ttl_hours,
+    )
+
+
 @router.post("/generate", response_model=AssessmentQuestionOut)
 def generate_and_save_assessments(
     body: GenerateAssessmentsRequest,
@@ -252,38 +343,17 @@ def generate_and_save_assessments(
     """Generate an assessment instance from a reusable assessment type definition."""
     if body.user_id != current_user_id:
         raise HTTPException(status_code=403, detail="Assessments can only be generated for the authenticated user.")
-    definition = get_assessment_definition(body.assessment_type_code)
-    generation_job, persisted_job = _resolve_job_requirements_for_generation(
+    return _generate_and_save_assessment(
         db,
-        assessment_type_code=definition.code,
+        request=request,
+        owner_user_id=current_user_id,
+        assessment_type_code=body.assessment_type_code,
         job_requirements_id=body.job_requirements_id,
-    )
-    items = build_assessment_items(definition, job=generation_job)
-    assessment = save_assessment(
-        db,
-        user_id=current_user_id,
-        job_requirements_id=persisted_job.id,
-        assessment_type_code=definition.code,
-        assessment_version=definition.version,
-        items=items,
-    )
-    latest_link = None
-    raw_token = None
-    if body.issue_one_time_link:
-        latest_link, raw_token = issue_assessment_access_link(
-            db,
-            assessment_id=assessment.id,
-            created_by_user_id=current_user_id,
-            candidate_email=body.candidate_email,
-            issued_reason=body.issued_reason,
-            ttl_hours=body.link_ttl_hours,
-        )
-    return _serialize_generated_assessment(
-        db,
-        assessment,
-        latest_link=latest_link,
-        raw_token=raw_token,
-        base_url=str(request.base_url).rstrip("/"),
+        issue_one_time_link=body.issue_one_time_link,
+        created_by_user_id=current_user_id,
+        candidate_email=body.candidate_email,
+        issued_reason=body.issued_reason,
+        link_ttl_hours=body.link_ttl_hours,
     )
 
 
