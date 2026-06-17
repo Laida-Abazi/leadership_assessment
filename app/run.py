@@ -25,6 +25,7 @@ logging.basicConfig(
 )
 
 from app.as_requirements.routes.ai_analysis import router as job_requirements_router
+from app.as_blueprinting.routes.assessment import public_router as public_assessments_router
 from app.as_blueprinting.routes.assessment import router as assessments_router
 from app.as_analysis.routes.analysis import router as analysis_router
 from app.auth.candidate_access import CANDIDATE_ACCESS_COOKIE_NAME
@@ -66,6 +67,7 @@ app = FastAPI(
 
 CORS_ORIGINS = [
     "https://leadership-assessment-front-app.vercel.app",
+    "https://voicecruitai-625898005754.europe-west4.run.app",
     "http://localhost:3000",
 ]
 app.add_middleware(
@@ -81,6 +83,7 @@ app.include_router(auth_router)
 app.include_router(candidate_router)
 protected_dependencies = [Depends(require_authenticated_user)]
 app.include_router(job_requirements_router, dependencies=protected_dependencies)
+app.include_router(public_assessments_router)
 app.include_router(assessments_router, dependencies=protected_dependencies)
 app.include_router(analysis_router, dependencies=protected_dependencies)
 app.include_router(agent_router)
