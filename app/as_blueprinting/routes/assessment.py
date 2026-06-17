@@ -1,5 +1,4 @@
 import asyncio
-import os
 import uuid
 
 from celery.result import AsyncResult
@@ -15,7 +14,7 @@ from app.as_requirements.routes.ai_analysis import (
 )
 from app.auth.login.deps import get_current_user_id
 from app.db import get_db
-from app.db.models import Analysis, AssessmentAccessLink, AssessmentCandidate, Assessments, JobRequirements, User
+from app.db.models import Analysis, AssessmentAccessLink, AssessmentCandidate, Assessments, JobRequirements
 from app.routers.intelligence import build_status_response
 from app.rag.embeddings import get_context_for_agent, index_assessment
 from app.services.assessment_persistence import get_assessment_item_payloads, sync_assessment_items
@@ -39,14 +38,12 @@ from app.services.interview_links import (
 from app.services.brightdata_linkedin import BrightDataError, fetch_linkedin_job_posting
 
 router = APIRouter(prefix="/assessments", tags=["assessments"])
-public_router = APIRouter(prefix="/assessments/public", tags=["assessments-public"])
 ASSESSMENT_OVERVIEW_CODES = ("leadership_core", "mbti", "slii", "sii")
-MBTI_PUBLIC_OWNER_USER_ID = int(os.getenv("MBTI_PUBLIC_OWNER_USER_ID", "1"))
 
 
 class GenerateAssessmentsRequest(BaseModel):
     job_requirements_id: int | None = None
-    user_id: int
+    user_id: int | None = None
     assessment_type_code: str = "leadership_core"
     issue_one_time_link: bool = False
     link_ttl_hours: int | None = None
@@ -56,7 +53,7 @@ class GenerateAssessmentsRequest(BaseModel):
 
 class GenerateAssessmentFromLinkedInJobRequest(BaseModel):
     linkedin_job_url: str
-    user_id: int
+    user_id: int | None = None
     assessment_type_code: str = "leadership_core"
     issue_one_time_link: bool = False
     link_ttl_hours: int | None = None
@@ -114,11 +111,6 @@ class IssueInterviewLinkRequest(BaseModel):
     candidate_email: str | None = None
     issued_reason: str | None = None
     ttl_hours: int | None = None
-
-
-class PublicMbtiAssessmentRequest(BaseModel):
-    candidate_email: str | None = None
-    link_ttl_hours: int | None = None
 
 
 def save_assessment(
@@ -250,17 +242,15 @@ def _require_owned_assessment(db: Session, assessment_id: int, current_user_id: 
     return assessment
 
 
-def _resolve_mbti_public_owner_user_id(db: Session) -> int:
-    owner = db.get(User, MBTI_PUBLIC_OWNER_USER_ID)
-    if not owner:
+def _resolve_owner_user_id(*, requested_user_id: int | None, current_user_id: int) -> int:
+    if requested_user_id is None:
+        return current_user_id
+    if requested_user_id != current_user_id:
         raise HTTPException(
-            status_code=503,
-            detail=(
-                "MBTI public creation is not configured. "
-                f"Set MBTI_PUBLIC_OWNER_USER_ID to an existing user id."
-            ),
+            status_code=403,
+            detail="Assessments can only be generated for the authenticated user.",
         )
-    return owner.id
+    return current_user_id
 
 
 def _generate_and_save_assessment(
@@ -311,28 +301,6 @@ def _generate_and_save_assessment(
     )
 
 
-@public_router.post("/mbti", response_model=AssessmentQuestionOut)
-def create_public_mbti_assessment(
-    body: PublicMbtiAssessmentRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    """Create an MBTI assessment without authentication and return a one-time interview link."""
-    owner_user_id = _resolve_mbti_public_owner_user_id(db)
-    return _generate_and_save_assessment(
-        db,
-        request=request,
-        owner_user_id=owner_user_id,
-        assessment_type_code="mbti",
-        job_requirements_id=None,
-        issue_one_time_link=True,
-        created_by_user_id=owner_user_id,
-        candidate_email=body.candidate_email,
-        issued_reason="public_mbti",
-        link_ttl_hours=body.link_ttl_hours,
-    )
-
-
 @router.post("/generate", response_model=AssessmentQuestionOut)
 def generate_and_save_assessments(
     body: GenerateAssessmentsRequest,
@@ -341,16 +309,18 @@ def generate_and_save_assessments(
     current_user_id: int = Depends(get_current_user_id),
 ):
     """Generate an assessment instance from a reusable assessment type definition."""
-    if body.user_id != current_user_id:
-        raise HTTPException(status_code=403, detail="Assessments can only be generated for the authenticated user.")
+    owner_user_id = _resolve_owner_user_id(
+        requested_user_id=body.user_id,
+        current_user_id=current_user_id,
+    )
     return _generate_and_save_assessment(
         db,
         request=request,
-        owner_user_id=current_user_id,
+        owner_user_id=owner_user_id,
         assessment_type_code=body.assessment_type_code,
         job_requirements_id=body.job_requirements_id,
         issue_one_time_link=body.issue_one_time_link,
-        created_by_user_id=current_user_id,
+        created_by_user_id=owner_user_id,
         candidate_email=body.candidate_email,
         issued_reason=body.issued_reason,
         link_ttl_hours=body.link_ttl_hours,
@@ -365,13 +335,15 @@ def generate_assessment_from_linkedin_job(
     current_user_id: int = Depends(get_current_user_id),
 ):
     """Fetch a LinkedIn job post via Bright Data and generate an assessment from it."""
-    if body.user_id != current_user_id:
-        raise HTTPException(status_code=403, detail="Assessments can only be generated for the authenticated user.")
+    owner_user_id = _resolve_owner_user_id(
+        requested_user_id=body.user_id,
+        current_user_id=current_user_id,
+    )
     from app.tasks.assessment import dispatch_linkedin_assessment_chain
 
     task_id = dispatch_linkedin_assessment_chain(
         linkedin_url=body.linkedin_job_url,
-        owner_user_id=str(current_user_id),
+        owner_user_id=str(owner_user_id),
     )
     return JSONResponse(
         status_code=202,
