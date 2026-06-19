@@ -6,7 +6,7 @@ from jose import JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.auth.signup.service import verify_password
+from app.auth.signup.service import EMAIL_VERIFICATION_ENABLED, verify_password
 from app.db.models import User
 
 JWT_SECRET_ENV_KEY = "JWT_SECRET_KEY"
@@ -70,7 +70,7 @@ def authenticate_user(
             detail="Invalid credentials",
         )
 
-    if not user.is_verified:
+    if EMAIL_VERIFICATION_ENABLED and not user.is_verified:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Please verify your email before logging in.",

@@ -1,4 +1,6 @@
 import secrets
+from os import getenv
+
 import bcrypt
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -7,6 +9,13 @@ from sqlalchemy.orm import Session
 from app.auth.email import send_verification_email
 from app.auth.signup.schemas import SignupRequest
 from app.db.models import User
+
+EMAIL_VERIFICATION_ENABLED = getenv("EMAIL_VERIFICATION_ENABLED", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 def hash_password(plain: str) -> str:
@@ -35,20 +44,21 @@ def check_existing_user(db: Session, email: str) -> None:
 def create_user(db: Session, payload: SignupRequest, verification_url: str) -> User:
     check_existing_user(db, payload.email.lower())
 
-    token = generate_verification_token()
+    token = generate_verification_token() if EMAIL_VERIFICATION_ENABLED else None
     user = User(
         name=payload.name.strip(),
         surname=payload.surname.strip(),
         email=payload.email.lower(),
         password=hash_password(payload.password),
-        is_verified=False,
+        is_verified=not EMAIL_VERIFICATION_ENABLED,
         verification_token=token,
     )
     db.add(user)
     db.commit()
     db.refresh(user)
 
-    send_verification_email(user.email, user.name, verification_url.format(token=token))
+    if EMAIL_VERIFICATION_ENABLED and token is not None:
+        send_verification_email(user.email, user.name, verification_url.format(token=token))
 
     return user
 

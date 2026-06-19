@@ -18,6 +18,12 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 JWT_SECRET = getenv("JWT_SECRET", "change-me-in-production")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = int(getenv("JWT_EXPIRATION_HOURS", "24"))
+EMAIL_VERIFICATION_ENABLED = getenv("EMAIL_VERIFICATION_ENABLED", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 class RegisterRequest(BaseModel):
@@ -88,28 +94,33 @@ def register(request: RegisterRequest, req: Request, db: Session = Depends(get_d
             detail="A user with this email address already exists.",
         )
 
-    token = secrets.token_urlsafe(32)
+    token = secrets.token_urlsafe(32) if EMAIL_VERIFICATION_ENABLED else None
     user = User(
         name=request.name.strip(),
         surname=request.surname.strip(),
         email=request.email.lower(),
         password=hash_password(request.password),
-        is_verified=False,
+        is_verified=not EMAIL_VERIFICATION_ENABLED,
         verification_token=token,
     )
     db.add(user)
     db.commit()
     db.refresh(user)
 
-    verification_url = build_frontend_verification_url(token)
-    send_verification_email(user.email, user.name, verification_url)
+    if EMAIL_VERIFICATION_ENABLED and token is not None:
+        verification_url = build_frontend_verification_url(token)
+        send_verification_email(user.email, user.name, verification_url)
 
     return RegisterResponse(
         id=user.id,
         email=user.email,
         name=user.name,
         surname=user.surname,
-        message="Account created. Please check your email to verify your account.",
+        message=(
+            "Account created. Please check your email to verify your account."
+            if EMAIL_VERIFICATION_ENABLED
+            else "Account created. You can log in now."
+        ),
     )
 
 
@@ -135,7 +146,7 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
     if not user or not verify_password(request.password, user.password):
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
-    if not user.is_verified:
+    if EMAIL_VERIFICATION_ENABLED and not user.is_verified:
         raise HTTPException(status_code=403, detail="Please verify your email before logging in.")
 
     token = create_access_token(user.id, user.email)
