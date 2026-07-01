@@ -89,6 +89,11 @@ STREAM_AGENT_TRANSCRIPT_TO_CLIENT = os.environ.get("STREAM_AGENT_TRANSCRIPT_TO_C
     "true",
     "yes",
 }
+ENABLE_SEMANTIC_QUESTION_DETECTION = os.environ.get("ENABLE_SEMANTIC_QUESTION_DETECTION", "").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 DEFAULT_SYSTEM_INSTRUCTION = (
     "You are a friendly, warm voice assistant. Have a natural, conversational chat with the user. "
@@ -885,7 +890,7 @@ async def agent_websocket(websocket: WebSocket):
         if classification == "COMPLETE":
             return classification, detected_q
 
-        if detected_q is None and _is_interview_mode():
+        if detected_q is None and _is_interview_mode() and ENABLE_SEMANTIC_QUESTION_DETECTION:
             detected_q = await _detect_question_from_output_semantic(
                 text,
                 questions,
