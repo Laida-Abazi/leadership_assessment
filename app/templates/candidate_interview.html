@@ -100,64 +100,6 @@
       color: var(--text);
     }
     .stack { display: grid; gap: 0.75rem; }
-    .transcript-panel {
-      display: grid;
-      gap: 0.75rem;
-    }
-    .transcript-feed {
-      max-height: 300px;
-      overflow-y: auto;
-      background: var(--surface-alt);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 0.75rem;
-      scroll-behavior: smooth;
-    }
-    .transcript-empty {
-      color: var(--muted);
-      font-size: 0.9rem;
-      line-height: 1.5;
-      padding: 0.5rem;
-    }
-    .transcript-row {
-      border: 1px solid rgba(124, 156, 255, 0.22);
-      border-radius: 12px;
-      padding: 0.75rem;
-      background: rgba(124, 156, 255, 0.08);
-      margin-bottom: 0.65rem;
-    }
-    .transcript-row:nth-child(even) {
-      background: rgba(124, 156, 255, 0.13);
-    }
-    .transcript-row:last-child {
-      margin-bottom: 0;
-    }
-    .transcript-speaker {
-      color: var(--accent-hover);
-      font-size: 0.76rem;
-      font-weight: 700;
-      letter-spacing: 0.05em;
-      margin-bottom: 0.35rem;
-      text-transform: uppercase;
-    }
-    .transcript-text {
-      line-height: 1.55;
-      white-space: pre-wrap;
-    }
-    .transcript-row.streaming .transcript-text::after {
-      content: "";
-      display: inline-block;
-      width: 0.45rem;
-      height: 1rem;
-      margin-left: 0.15rem;
-      vertical-align: -0.15rem;
-      background: var(--accent-hover);
-      border-radius: 999px;
-      animation: blink 1s steps(2, start) infinite;
-    }
-    @keyframes blink {
-      50% { opacity: 0; }
-    }
   </style>
 </head>
 <body>
@@ -169,16 +111,6 @@
       <button id="btn" class="primary">Start Interview</button>
       <button id="restartBtn" class="secondary" type="button">Start Over</button>
       <p class="hint">Allow microphone access. After the connection is established, answer each question naturally and wait for the next one.</p>
-    </section>
-
-    <section class="card transcript-panel" aria-labelledby="transcript-title">
-      <div>
-        <h2 id="transcript-title">Live Transcript</h2>
-        <p class="sub">Interviewer speech appears here as it is generated.</p>
-      </div>
-      <div id="transcriptFeed" class="transcript-feed" aria-live="polite" aria-relevant="additions text">
-        <div id="transcriptEmpty" class="transcript-empty">The interviewer transcript will appear when the session starts.</div>
-      </div>
     </section>
 
     <section id="results" class="card hidden">
@@ -226,8 +158,6 @@
       const recommendationEl = document.getElementById("recommendation");
       const analysisEl = document.getElementById("analysis");
       const riskFlagsEl = document.getElementById("risk-flags");
-      const transcriptFeedEl = document.getElementById("transcriptFeed");
-      const transcriptEmptyEl = document.getElementById("transcriptEmpty");
 
       const params = new URLSearchParams(window.location.search);
       const assessmentId = parseInt(params.get("assessment_id") || "", 10);
@@ -252,9 +182,6 @@
       let reconnectAttempts = 0;
       let reconnectTimer = null;
       let pollingTimer = null;
-      let currentAgentTranscriptRow = null;
-      let currentAgentTranscriptText = null;
-      let currentAgentTranscriptTurnId = null;
 
       function setStatus(kind, text) {
         statusEl.className = "status " + kind;
@@ -282,79 +209,6 @@
         const start = Math.max(nextPlayTime, now);
         node.start(start);
         nextPlayTime = start + buffer.duration;
-      }
-
-      function appendWithReadableSpacing(existing, chunk) {
-        const text = String(chunk || "").trim();
-        if (!text) return existing || "";
-        const current = existing || "";
-        if (!current) return text;
-        if (/[\s(["']$/.test(current) || /^[\s.,!?;:)\]"']/.test(text)) {
-          return current + text;
-        }
-        return current + " " + text;
-      }
-
-      function scrollTranscriptToBottom() {
-        transcriptFeedEl.scrollTop = transcriptFeedEl.scrollHeight;
-      }
-
-      function clearTranscript() {
-        currentAgentTranscriptRow = null;
-        currentAgentTranscriptText = null;
-        currentAgentTranscriptTurnId = null;
-        transcriptFeedEl.innerHTML = "";
-        transcriptFeedEl.appendChild(transcriptEmptyEl);
-        transcriptEmptyEl.hidden = false;
-        scrollTranscriptToBottom();
-      }
-
-      function ensureAgentTranscriptRow(turnId) {
-        if (currentAgentTranscriptRow && currentAgentTranscriptTurnId === turnId) {
-          return currentAgentTranscriptRow;
-        }
-        transcriptEmptyEl.hidden = true;
-        if (transcriptEmptyEl.parentNode) transcriptEmptyEl.parentNode.removeChild(transcriptEmptyEl);
-
-        const row = document.createElement("div");
-        row.className = "transcript-row streaming";
-        row.dataset.turnId = String(turnId);
-
-        const speaker = document.createElement("div");
-        speaker.className = "transcript-speaker";
-        speaker.textContent = "Interviewer";
-
-        const text = document.createElement("div");
-        text.className = "transcript-text";
-
-        row.appendChild(speaker);
-        row.appendChild(text);
-        transcriptFeedEl.appendChild(row);
-
-        currentAgentTranscriptRow = row;
-        currentAgentTranscriptText = text;
-        currentAgentTranscriptTurnId = turnId;
-        scrollTranscriptToBottom();
-        return row;
-      }
-
-      function handleTranscriptEvent(transcript) {
-        if (!transcript || transcript.speaker !== "agent") return;
-        const turnId = Number.isInteger(transcript.turn_id) ? transcript.turn_id : 0;
-        const row = ensureAgentTranscriptRow(turnId);
-        if (transcript.text && currentAgentTranscriptText) {
-          currentAgentTranscriptText.textContent = appendWithReadableSpacing(
-            currentAgentTranscriptText.textContent,
-            transcript.text
-          );
-        }
-        if (transcript.final) {
-          row.classList.remove("streaming");
-          currentAgentTranscriptRow = null;
-          currentAgentTranscriptText = null;
-          currentAgentTranscriptTurnId = null;
-        }
-        scrollTranscriptToBottom();
       }
 
       const workletCode = `
@@ -608,7 +462,6 @@
         const url = protocol + "//" + window.location.host + "/agent/ws?assessment_id=" + encodeURIComponent(assessmentId);
         clearReconnectTimer();
         setStatus("connecting", isReconnect ? "Reconnecting interview…" : "Connecting interview…");
-        if (!isReconnect) clearTranscript();
         ws = new WebSocket(url);
         ws.binaryType = "arraybuffer";
 
@@ -617,10 +470,6 @@
             try {
               const message = JSON.parse(event.data);
               if (message.ping) return;
-              if (message.transcript) {
-                handleTranscriptEvent(message.transcript);
-                return;
-              }
               if (message.status === "connected" || message.status === "reconnected") {
                 hadInterviewConnection = true;
                 reconnectAttempts = 0;
@@ -725,7 +574,6 @@
           reconnectAttempts = 0;
           nextPlayTime = 0;
           clearPollingTimer();
-          clearTranscript();
           resultsEl.classList.add("hidden");
           metricStatusEl.textContent = "READY";
           resetPendingResultCopy();
