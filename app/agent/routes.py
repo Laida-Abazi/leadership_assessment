@@ -82,9 +82,6 @@ LIVE_MODEL = os.environ.get(
 # Agent voice name.
 AGENT_VOICE = os.environ.get("GEMINI_LIVE_VOICE", "Puck")
 
-# Gemini Live VAD: require this much silence before committing end-of-speech.
-END_OF_SPEECH_SILENCE_MS = 800
-
 DEFAULT_SYSTEM_INSTRUCTION = (
     "You are a friendly, warm voice assistant. Have a natural, conversational chat with the user. "
     "Keep responses concise and conversational so they work well in a voice dialogue. "
@@ -1228,12 +1225,6 @@ async def agent_websocket(websocket: WebSocket):
             "speech_config": {
                 "voice_config": {
                     "prebuilt_voice_config": {"voice_name": AGENT_VOICE},
-                },
-            },
-            "realtime_input_config": {
-                "automatic_activity_detection": {
-                    "disabled": False,
-                    "silence_duration_ms": END_OF_SPEECH_SILENCE_MS,
                 },
             },
         }
