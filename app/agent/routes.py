@@ -1576,6 +1576,28 @@ async def agent_websocket(websocket: WebSocket):
 
                                         turn_complete: bool = bool(getattr(sc, "turn_complete", False))
                                         model_turn = getattr(sc, "model_turn", None)
+
+                                        # Forward audio before transcript/status JSON so UI features never
+                                        # delay the first audible response.
+                                        parts = None
+                                        if model_turn and getattr(model_turn, "parts", None):
+                                            parts = model_turn.parts
+                                        if not parts:
+                                            parts = getattr(sc, "parts", None)
+
+                                        if parts:
+                                            for part in parts:
+                                                inline = getattr(part, "inline_data", None)
+                                                if inline and getattr(inline, "data", None):
+                                                    try:
+                                                        await websocket.send_bytes(inline.data)
+                                                        if _is_interview_mode():
+                                                            state["agent_spoke"] = True
+                                                    except Exception as exc:
+                                                        logger.warning("Failed to send audio to client: %s", exc)
+                                                        signal_client_disconnect()
+                                                        return
+
                                         if turn_complete:
                                             logger.info(
                                                 "[%s] Gemini turn_complete=True: assessment_id=%s q=%s/%s warmup=%s agent_spoke=%s session_open=%s transcript_len=%s",
@@ -1780,27 +1802,6 @@ async def agent_websocket(websocket: WebSocket):
                                                 state["agent_transcript_turn_had_text"] = False
                                             state["output_transcript"] = ""
                                             state["agent_turn_transition_handled"] = False
-
-                                        # ── Forward audio to client ───────────────────────
-                                        parts = None
-                                        if model_turn and getattr(model_turn, "parts", None):
-                                            parts = model_turn.parts
-                                        if not parts:
-                                            parts = getattr(sc, "parts", None)
-
-                                        if parts:
-                                            for part in parts:
-                                                inline = getattr(part, "inline_data", None)
-                                                if inline and getattr(inline, "data", None):
-                                                    try:
-                                                        await websocket.send_bytes(inline.data)
-                                                        # Mark that the agent has produced audio.
-                                                        if _is_interview_mode():
-                                                            state["agent_spoke"] = True
-                                                    except Exception as exc:
-                                                        logger.warning("Failed to send audio to client: %s", exc)
-                                                        signal_client_disconnect()
-                                                        return
 
                                         # ── Interruption signal ───────────────────────────
                                         if getattr(sc, "interrupted", False):
