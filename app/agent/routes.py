@@ -82,6 +82,9 @@ LIVE_MODEL = os.environ.get(
 # Agent voice name.
 AGENT_VOICE = os.environ.get("GEMINI_LIVE_VOICE", "Puck")
 
+# Gemini Live VAD: require this much silence before committing end-of-speech.
+END_OF_SPEECH_SILENCE_MS = 800
+
 DEFAULT_SYSTEM_INSTRUCTION = (
     "You are a friendly, warm voice assistant. Have a natural, conversational chat with the user. "
     "Keep responses concise and conversational so they work well in a voice dialogue. "
@@ -690,6 +693,7 @@ async def agent_websocket(websocket: WebSocket):
     #   awaiting_user_turn_end  – user speech received, not yet closed
     #   current_question_anchor_seen – agent confirmed to have asked this q
     #   output_transcript       – accumulates agent speech for classification
+    #   agent_transcript_turn_id – client-visible id for streaming agent transcript rows
     #   question_session_open   – True = inside an active question session
     #   agent_turn_classification – last classifier result for agent output
     # ─────────────────────────────────────────────────────────────────────────
@@ -705,6 +709,8 @@ async def agent_websocket(websocket: WebSocket):
         "first_question_capture_logged": False,
         "current_question_anchor_seen": already_saved > 0,
         "output_transcript": "",
+        "agent_transcript_turn_id": 0,
+        "agent_transcript_turn_had_text": False,
         "agent_turn_transition_handled": False,
         "turn_complete_seen_for_current_question": False,
         # Session-based state — True immediately on resume; set True when warm-up ends.
@@ -1224,6 +1230,12 @@ async def agent_websocket(websocket: WebSocket):
                     "prebuilt_voice_config": {"voice_name": AGENT_VOICE},
                 },
             },
+            "realtime_input_config": {
+                "automatic_activity_detection": {
+                    "disabled": False,
+                    "silence_duration_ms": END_OF_SPEECH_SILENCE_MS,
+                },
+            },
         }
 
         if _is_interview_mode():
@@ -1601,6 +1613,19 @@ async def agent_websocket(websocket: WebSocket):
                                                 state["output_transcript"] = (
                                                     f"{state.get('output_transcript', '')} {out_text}"
                                                 ).strip()
+                                                state["agent_transcript_turn_had_text"] = True
+                                                try:
+                                                    await websocket.send_json({
+                                                        "transcript": {
+                                                            "speaker": "agent",
+                                                            "turn_id": state["agent_transcript_turn_id"],
+                                                            "text": out_text,
+                                                            "final": False,
+                                                        }
+                                                    })
+                                                except Exception:
+                                                    signal_client_disconnect()
+                                                    return
 
                                         # ── Input transcription (user speech) ────────────
                                         in_trans = getattr(sc, "input_transcription", None)
@@ -1747,6 +1772,21 @@ async def agent_websocket(websocket: WebSocket):
                                                     _schedule_final_analysis_if_ready("agent_complete_signal")
 
                                             # Reset agent-turn output accumulator (classifier starts fresh).
+                                            if state.get("agent_transcript_turn_had_text"):
+                                                try:
+                                                    await websocket.send_json({
+                                                        "transcript": {
+                                                            "speaker": "agent",
+                                                            "turn_id": state["agent_transcript_turn_id"],
+                                                            "text": "",
+                                                            "final": True,
+                                                        }
+                                                    })
+                                                except Exception:
+                                                    signal_client_disconnect()
+                                                    return
+                                                state["agent_transcript_turn_id"] += 1
+                                                state["agent_transcript_turn_had_text"] = False
                                             state["output_transcript"] = ""
                                             state["agent_turn_transition_handled"] = False
 
