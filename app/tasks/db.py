@@ -16,10 +16,18 @@ SYNC_DATABASE_URL = (
     else DATABASE_URL
 )
 
+# Cloud SQL is on a tiny tier (db-f1-micro, ~25 max_connections) shared with
+# the FastAPI service across multiple independently-scaling Cloud Run
+# instances, and this engine is instantiated separately per Celery worker
+# process (signals/analysis/background). Keep the per-process footprint small
+# and recycle connections periodically since Cloud SQL can drop idle ones the
+# pool isn't aware of.
 sync_engine = create_engine(
     SYNC_DATABASE_URL,
     pool_pre_ping=True,
-    pool_size=5,
+    pool_size=2,
+    max_overflow=1,
+    pool_recycle=300,
 )
 
 SyncSessionLocal = sessionmaker(
