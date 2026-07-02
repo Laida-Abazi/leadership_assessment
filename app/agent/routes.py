@@ -794,26 +794,47 @@ async def agent_websocket(websocket: WebSocket):
             )
             return False
 
-        from app.tasks.analysis import dispatch_analysis_chord
+        # Reserve the slot synchronously (in-memory only) so a concurrent
+        # caller can't double-dispatch while the broker call below runs.
+        state["analysis_pipeline_id"] = "pending"
 
-        pipeline_id = dispatch_analysis_chord(
-            candidate_id,
-            assessment_id,
-            list(state.get("segment_ids") or []),
-        )
-        state["analysis_pipeline_id"] = pipeline_id
-        logger.info(
-            "[%s] Analysis pipeline dispatched: pipeline_id=%s candidate=%s reason=%s assessment_id=%s "
-            "saved=%s total=%s segments=%s",
-            session_id,
-            pipeline_id,
-            candidate_id,
-            reason,
-            assessment_id,
-            saved_answers,
-            len(response_fields),
-            len(state.get("segment_ids") or []),
-        )
+        async def _dispatch_analysis_chord_async() -> None:
+            from app.tasks.analysis import dispatch_analysis_chord
+
+            try:
+                # dispatch_analysis_chord() publishes several messages to
+                # RabbitMQ/Redis synchronously. Run it off the event loop so
+                # a slow/unreachable broker can't stall live audio forwarding
+                # for this or any other concurrently connected session.
+                pipeline_id = await asyncio.to_thread(
+                    dispatch_analysis_chord,
+                    candidate_id,
+                    assessment_id,
+                    list(state.get("segment_ids") or []),
+                )
+                state["analysis_pipeline_id"] = pipeline_id
+                logger.info(
+                    "[%s] Analysis pipeline dispatched: pipeline_id=%s candidate=%s reason=%s assessment_id=%s "
+                    "saved=%s total=%s segments=%s",
+                    session_id,
+                    pipeline_id,
+                    candidate_id,
+                    reason,
+                    assessment_id,
+                    saved_answers,
+                    len(response_fields),
+                    len(state.get("segment_ids") or []),
+                )
+            except Exception:
+                state["analysis_pipeline_id"] = None
+                logger.exception(
+                    "[%s] Failed to dispatch analysis pipeline: reason=%s assessment_id=%s",
+                    session_id,
+                    reason,
+                    assessment_id,
+                )
+
+        asyncio.create_task(_dispatch_analysis_chord_async(), name="dispatch-analysis-chord")
         return True
 
     def _classify_agent_turn(text: str) -> str:
@@ -987,11 +1008,18 @@ async def agent_websocket(websocket: WebSocket):
             )
             segment_id = str(seg.id)
             state["segment_ids"].append(segment_id)
-            task = extract_signals.apply_async(
+            # extract_signals.apply_async() and register_signal_task() are
+            # synchronous network calls (RabbitMQ publish, Redis writes). Run
+            # them off the event loop so a slow/unreachable broker never
+            # stalls live audio forwarding for this or any other session.
+            task = await asyncio.to_thread(
+                extract_signals.apply_async,
                 args=[segment_id, candidate_id, assessment_id],
                 queue="signals",
             )
-            task_registry.register_signal_task(segment_id, candidate_id, task.id)
+            await asyncio.to_thread(
+                task_registry.register_signal_task, segment_id, candidate_id, task.id
+            )
             logger.info(
                 "[%s] Signal extraction dispatched: task_id=%s segment=%s",
                 session_id,
