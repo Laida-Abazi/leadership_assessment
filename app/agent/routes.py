@@ -74,13 +74,24 @@ def reset_admin_assessment_session(
 
 
 # Gemini Live model for native audio (voice) conversation.
+# gemini-2.5-flash-native-audio-preview-12-2025 is deprecated by Google and
+# prone to mid-session 1011 disconnects; gemini-3.1-flash-live-preview is the
+# recommended replacement (lower latency, more stable, same voice roster).
 LIVE_MODEL = os.environ.get(
     "GEMINI_LIVE_MODEL",
-    "gemini-2.5-flash-native-audio-preview-12-2025",
+    "gemini-3.1-flash-live-preview",
 )
 
 # Agent voice name.
 AGENT_VOICE = os.environ.get("GEMINI_LIVE_VOICE", "Puck")
+
+# Streaming transcript JSON shares the same WebSocket as audio. Keep it off by
+# default so audio response latency stays prioritized.
+STREAM_AGENT_TRANSCRIPT_TO_CLIENT = os.environ.get("STREAM_AGENT_TRANSCRIPT_TO_CLIENT", "").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 DEFAULT_SYSTEM_INSTRUCTION = (
     "You are a friendly, warm voice assistant. Have a natural, conversational chat with the user. "
@@ -690,6 +701,7 @@ async def agent_websocket(websocket: WebSocket):
     #   awaiting_user_turn_end  – user speech received, not yet closed
     #   current_question_anchor_seen – agent confirmed to have asked this q
     #   output_transcript       – accumulates agent speech for classification
+    #   agent_transcript_turn_id – client-visible id for streaming agent transcript rows
     #   question_session_open   – True = inside an active question session
     #   agent_turn_classification – last classifier result for agent output
     # ─────────────────────────────────────────────────────────────────────────
@@ -705,6 +717,8 @@ async def agent_websocket(websocket: WebSocket):
         "first_question_capture_logged": False,
         "current_question_anchor_seen": already_saved > 0,
         "output_transcript": "",
+        "agent_transcript_turn_id": 0,
+        "agent_transcript_turn_had_text": False,
         "agent_turn_transition_handled": False,
         "turn_complete_seen_for_current_question": False,
         # Session-based state — True immediately on resume; set True when warm-up ends.
@@ -1601,6 +1615,28 @@ async def agent_websocket(websocket: WebSocket):
 
                                         turn_complete: bool = bool(getattr(sc, "turn_complete", False))
                                         model_turn = getattr(sc, "model_turn", None)
+
+                                        # Forward audio before transcript/status JSON so UI features never
+                                        # delay the first audible response.
+                                        parts = None
+                                        if model_turn and getattr(model_turn, "parts", None):
+                                            parts = model_turn.parts
+                                        if not parts:
+                                            parts = getattr(sc, "parts", None)
+
+                                        if parts:
+                                            for part in parts:
+                                                inline = getattr(part, "inline_data", None)
+                                                if inline and getattr(inline, "data", None):
+                                                    try:
+                                                        await websocket.send_bytes(inline.data)
+                                                        if _is_interview_mode():
+                                                            state["agent_spoke"] = True
+                                                    except Exception as exc:
+                                                        logger.warning("Failed to send audio to client: %s", exc)
+                                                        signal_client_disconnect()
+                                                        return
+
                                         if turn_complete:
                                             logger.info(
                                                 "[%s] Gemini turn_complete=True: assessment_id=%s q=%s/%s warmup=%s agent_spoke=%s session_open=%s transcript_len=%s",
@@ -1629,6 +1665,20 @@ async def agent_websocket(websocket: WebSocket):
                                                 state["output_transcript"] = (
                                                     f"{state.get('output_transcript', '')} {out_text}"
                                                 ).strip()
+                                                if STREAM_AGENT_TRANSCRIPT_TO_CLIENT:
+                                                    state["agent_transcript_turn_had_text"] = True
+                                                    try:
+                                                        await websocket.send_json({
+                                                            "transcript": {
+                                                                "speaker": "agent",
+                                                                "turn_id": state["agent_transcript_turn_id"],
+                                                                "text": out_text,
+                                                                "final": False,
+                                                            }
+                                                        })
+                                                    except Exception:
+                                                        signal_client_disconnect()
+                                                        return
 
                                         # ── Input transcription (user speech) ────────────
                                         in_trans = getattr(sc, "input_transcription", None)
@@ -1775,29 +1825,23 @@ async def agent_websocket(websocket: WebSocket):
                                                     _schedule_final_analysis_if_ready("agent_complete_signal")
 
                                             # Reset agent-turn output accumulator (classifier starts fresh).
+                                            if STREAM_AGENT_TRANSCRIPT_TO_CLIENT and state.get("agent_transcript_turn_had_text"):
+                                                try:
+                                                    await websocket.send_json({
+                                                        "transcript": {
+                                                            "speaker": "agent",
+                                                            "turn_id": state["agent_transcript_turn_id"],
+                                                            "text": "",
+                                                            "final": True,
+                                                        }
+                                                    })
+                                                except Exception:
+                                                    signal_client_disconnect()
+                                                    return
+                                                state["agent_transcript_turn_id"] += 1
+                                                state["agent_transcript_turn_had_text"] = False
                                             state["output_transcript"] = ""
                                             state["agent_turn_transition_handled"] = False
-
-                                        # ── Forward audio to client ───────────────────────
-                                        parts = None
-                                        if model_turn and getattr(model_turn, "parts", None):
-                                            parts = model_turn.parts
-                                        if not parts:
-                                            parts = getattr(sc, "parts", None)
-
-                                        if parts:
-                                            for part in parts:
-                                                inline = getattr(part, "inline_data", None)
-                                                if inline and getattr(inline, "data", None):
-                                                    try:
-                                                        await websocket.send_bytes(inline.data)
-                                                        # Mark that the agent has produced audio.
-                                                        if _is_interview_mode():
-                                                            state["agent_spoke"] = True
-                                                    except Exception as exc:
-                                                        logger.warning("Failed to send audio to client: %s", exc)
-                                                        signal_client_disconnect()
-                                                        return
 
                                         # ── Interruption signal ───────────────────────────
                                         if getattr(sc, "interrupted", False):
